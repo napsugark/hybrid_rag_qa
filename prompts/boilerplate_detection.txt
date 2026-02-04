@@ -1,0 +1,26 @@
+Analyze the following text and determine if it is boilerplate content (legal terms, payment instructions, standard clauses).
+
+Text:
+{{content}}
+
+Respond with ONLY a JSON object:
+{
+  "is_boilerplate": true or false,
+  "confidence": 0.0 to 1.0,
+  "reason": "brief explanation"
+}
+
+Boilerplate indicators:
+- Legal disclaimers ("conform legislației", "ANRE", "în conformitate cu")
+- Payment terms ("plata se va efectua", "penalități", "dobânzi")
+- Standard clauses ("condiții generale", "termeni și condiții")
+- Environmental disclosures ("emisii CO2", "deșeuri radioactive")
+- Dispute resolution text
+- Repeated footer/header text
+
+NOT boilerplate:
+- Line items describing services
+- Specific amounts, quantities, periods
+- Custom contract terms
+- Delivery details
+- Project descriptions

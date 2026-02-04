@@ -1,0 +1,26 @@
+# Core Haystack
+haystack-ai>=2.8.0
+
+# Ollama Integration
+ollama-haystack>=0.0.8
+
+# Qdrant Integration
+qdrant-haystack>=4.0.0
+
+# FastEmbed for Sparse Embeddings
+fastembed-haystack>=1.0.0
+
+# Sentence Transformers for Dense Embeddings
+sentence-transformers>=3.0.0
+
+# Document Processing
+PyPDF2>=3.0.0
+python-dotenv>=1.0.0
+trafilatura>=1.12.0
+
+# Utilities
+tqdm>=4.66.0
+rich>=13.7.0
+
+# Optional: GPU acceleration
+# torch>=2.0.0  # Uncomment for GPU support

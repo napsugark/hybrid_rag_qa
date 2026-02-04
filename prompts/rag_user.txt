@@ -1,0 +1,63 @@
+Answer the following question using ONLY the information from these documents:
+
+{% for doc in documents %}
+---
+Document {{ loop.index }}:
+Filename (from meta.file_path): {{ doc.meta.get('file_path', 'Unknown').split('/')[-1] }}
+{% if doc.score is not none %}Relevance: {{ "%.3f"|format(doc.score) }}{% endif %}
+{% if doc.meta.get('summary') %}
+Summary: {{ doc.meta.summary }}
+{% endif %}
+{% if doc.meta.get('topics') %}
+Topics: {{ doc.meta.topics|join(', ') }}
+{% endif %}
+{% if doc.meta.get('keywords') %}
+Keywords: {{ doc.meta.keywords|join(', ') }}
+{% endif %}
+{% if doc.meta.get('entities') %}
+Entities: {{ doc.meta.entities|join(', ') }}
+{% endif %}
+{% if doc.meta.get('triples') %}
+Entity Relationships:
+{% for triple in doc.meta.triples %}
+  - {{ triple }}
+{% endfor %}
+{% endif %}
+{% if doc.meta.get('company') %}
+Company: {{ doc.meta.company }}
+{% endif %}
+{% if doc.meta.get('document_type') %}
+Document Type: {{ doc.meta.document_type }}
+{% endif %}
+{% if doc.meta.get('year') %}
+Year: {{ doc.meta.year }}
+{% endif %}
+{% if doc.meta.get('invoice_number') %}
+Invoice Number: {{ doc.meta.invoice_number }}
+{% endif %}
+
+Content:
+{{ doc.content }}
+
+{% endfor %}
+---
+
+Question: {{ query }}
+
+Instructions:
+- Use information from ALL provided documents to answer comprehensively
+- Higher relevance scores indicate more relevant documents
+- Use metadata (entities, relationships, topics) to enrich your understanding
+- **ALWAYS cite specific document filenames** (e.g., "DII1P60000000054147611.pdf") when referencing information
+- When listing documents, provide the actual filenames from the "Source:" field, NOT "Document 1, Document 2"
+- If the answer requires information from multiple documents, synthesize them and list all relevant filenames
+- If no documents contain the answer, state this clearly
+
+Before answering:
+1. List all company names explicitly mentioned in the documents.
+2. Check if the question entity appears in that list.
+3. If yes, list the ACTUAL DOCUMENT FILENAMES that contain information about it.
+4. Summarize what those documents say about it.
+5. Only then write the final answer with document filename citations.
+
+Answer:

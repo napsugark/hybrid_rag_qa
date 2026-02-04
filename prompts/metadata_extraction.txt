@@ -1,0 +1,91 @@
+Analyze the following document and extract structured metadata.
+
+CRITICAL INSTRUCTIONS:
+- This is the HEADER/FIRST PAGE of the document
+- Extract ONLY from the invoice header, NOT from address blocks or legal text
+- For invoices, the SELLER is usually "S.C. ... S.A." or "... S.R.L."
+- For invoices, the CLIENT is the recipient/buyer
+- Extract the PRIMARY invoice date (issue date), not due date or period
+
+Document text:
+{{content}}
+
+Respond with ONLY a valid JSON object in this exact format (no markdown, no comments, no extra text):
+{
+  "company": "Main company/vendor/seller name (MUST be company issuing the invoice)",
+  "client": "Client/customer/buyer name",
+  "year": 2025,
+  "month": 1,
+  "day": 18,
+  "date": "18.01.2025",
+  "document_type": "factura",
+  "invoice_number": "INV-12345",
+  "amount": 1234.56,
+  "currency": "RON",
+  "entities": ["entity1", "entity2"],
+  "topics": ["topic1", "topic2"],
+  "keywords": ["keyword1", "keyword2"],
+  "language": "ro",
+  "triples": [
+    {
+      "subject": "Entity or concept",
+      "relation": "action or relationship",
+      "object": "Entity, value, or concept"
+    }
+  ]
+}
+
+Rules:
+- company: CRITICAL - The ISSUER/SELLER of the invoice (look for "Furnizor:", "Emitent:", or company with CUI/CIF in header)
+  * For Electrica invoices: company should be "Electrica Furnizare S.A." or "S.C. Electrica Furnizare S.A."
+  * NOT the client name appearing in address section
+  * PRESERVE ORIGINAL LANGUAGE
+- client: The RECIPIENT/BUYER/CUSTOMER (look for "Client:", "Cumparator:", or address section)
+  * PRESERVE ORIGINAL LANGUAGE
+- year: Extract year as INTEGER (e.g., 2025), use null if not found
+- month: Extract month as INTEGER 1-12, use null if not found
+- day: Extract day as INTEGER 1-31, use null if not found
+- date: CRITICAL - Extract INVOICE ISSUE DATE in ORIGINAL format (DD.MM.YYYY, DD/MM/YYYY, etc.)
+  * Look for: "Data emiterii:", "Data facturii:", "Data:", invoice header date
+  * NOT "Data scadentă" (due date)
+  * NOT consumption period dates
+  * This is PRIMARY search criteria
+- document_type: One of: factura, chitanta, contract, oferta, raport, email, buget, technical_doc, other
+  * Detect from document content and title
+- invoice_number: Invoice/document number, ID, or reference
+  * Look for: "Numar factura:", "Nr. factura:", "Invoice #:"
+  * PRESERVE ORIGINAL FORMAT (including letters, dashes, slashes)
+- amount: TOTAL TO PAY as FLOAT number (e.g., 1234.56)
+  * Look for: "Total de plată:", "Total general:", "TOTAL:"
+  * Extract the final amount to be paid (after tax)
+  * Use null if not found
+- currency: Currency code (RON, EUR, USD, Lei, etc.)
+  * PRESERVE ORIGINAL LANGUAGE
+- entities: Max 5 important names from HEADER ONLY (company names, key people, locations in header)
+  * PRESERVE ORIGINAL LANGUAGE
+  * DO NOT include entities from legal disclaimers or address blocks
+- topics: Max 3 main themes from HEADER/LINE ITEMS section
+  * Examples: "energie electrică", "servicii hosting", "consultanță"
+  * PRESERVE ORIGINAL LANGUAGE
+  * DO NOT include "condiții generale" or legal topics
+- keywords: Max 7 important terms from INVOICE CONTENT (not legal text)
+  * Include: service names, contract references, billing periods
+  * DO NOT include: "TVA", "ANRE", "condiții", "penalități" (unless core to invoice)
+  * PRESERVE ORIGINAL LANGUAGE
+- language: Two-letter code (ro, en, de, etc.)
+- triples: Extract ONLY 2-3 BUSINESS relationships from INVOICE DATA (not legal text)
+  * ONLY extract if there are clear, meaningful business relationships
+  * Examples: "issued_invoice_to", "paid_amount", "provided_service_to", "delivered_to"
+  * Subject: Company issuing invoice
+  * Object: Client receiving invoice OR service provided OR amount
+  * DO NOT extract from legal disclaimers or payment terms
+  * DO NOT extract "customer has right to..." or similar legal statements
+  * If no strong business relationships exist, return empty array []
+
+IMPORTANT:
+- Use null for fields that cannot be found (not empty strings)
+- PRESERVE ORIGINAL LANGUAGE for all text fields (Romanian names stay Romanian)
+- Extract dates EXACTLY as they appear in the document
+- Focus on INVOICE HEADER and LINE ITEMS, ignore legal disclaimers
+- DO NOT include comments, explanations, or markdown formatting
+- Return ONLY the JSON object

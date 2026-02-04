@@ -1,0 +1,26 @@
+# virtual environments
+.venv/
+venv/
+
+# caches
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# secrets
+.env
+
+# OS
+.DS_Store
+
+# documentation and data
+docs/
+data/
+logs/
+
+# data files
+*.json
+*.pdf

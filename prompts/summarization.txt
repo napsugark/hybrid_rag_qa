@@ -1,0 +1,15 @@
+Summarize the following text concisely, focusing on the main business information.
+
+Style: {{style}}
+Maximum length: {{max_length}} words
+
+RULES:
+- Focus on: services provided, amounts, periods, deliverables
+- Include: key business facts, dates, quantities
+- Exclude: legal disclaimers, payment terms, standard clauses
+- Be factual and concise
+
+Text:
+{{content}}
+
+Summary:

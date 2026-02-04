@@ -1,0 +1,35 @@
+Answer the following question using ONLY the information from these documents:
+
+{% for doc in documents %}
+---
+Document {{ loop.index }}:
+Filename (from meta.file_path): {{ doc.meta.get('file_path', 'Unknown').split('/')[-1] }}
+{% if doc.score is not none %}Relevance: {{ "%.3f"|format(doc.score) }}{% endif %}
+{% if doc.meta.get('summary') %}
+Summary: {{ doc.meta.summary }}
+{% endif %}
+{% if doc.meta.get('entities') %}
+Entities: {{ doc.meta.entities|join(', ') }}
+{% endif %}
+{% if doc.meta.get('triples') %}
+Relationships: {{ doc.meta.triples|join('; ') }}
+{% endif %}
+{% if doc.meta.get('company') %}Company: {{ doc.meta.company }}{% endif %}
+{% if doc.meta.get('document_type') %}Type: {{ doc.meta.document_type }}{% endif %}
+
+Content:
+{{ doc.content }}
+
+{% endfor %}
+---
+
+Question: {{ query }}
+
+Instructions:
+- Answer in 1-2 SHORT sentences only
+- Cite actual document filenames inline (e.g., "according to invoice_123.pdf")
+- DO NOT use structured format, numbered lists, or bullet points
+- DO NOT use generic references like "Document 1" - use actual filenames only
+- If no documents contain the answer, say "I don't have this information"
+
+Answer:

@@ -1,0 +1,24 @@
+Based on the documents below, answer the question.
+
+DOCUMENTS:
+{% for doc in documents %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Document {{ loop.index }}: {{ doc.meta.get('file_path', 'Unknown').split('/')[-1] }}
+Relevance: {{ "%.1f%%"|format(doc.score * 100) if doc.score is not none else 'N/A' }}
+{% if doc.meta.get('summary') %}
+Summary: {{ doc.meta.summary }}
+{% endif %}
+{% if doc.meta.get('entities') %}
+Key Information: {{ doc.meta.entities|join(', ') }}
+{% endif %}
+
+{{ doc.content }}
+
+{% endfor %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUESTION: {{ query }}
+
+Provide a clear, accurate answer based on the documents above. Reference specific documents when making claims.
+
+ANSWER:
