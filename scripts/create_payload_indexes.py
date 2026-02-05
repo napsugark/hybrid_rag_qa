@@ -88,14 +88,14 @@ def create_metadata_indexes():
                 field_schema=schema_type,
             )
             
-            logger.info("    ✓ Created")
+            logger.info("    [OK] Created")
             
         except Exception as e:
             # Check if index already exists
             if "already exists" in str(e).lower():
-                logger.info("    ✓ Already exists")
+                logger.info("    [OK] Already exists")
             else:
-                logger.error(f"    ✗ Failed: {e}")
+                logger.error(f"    [FAILED] {e}")
     
     logger.info("")
     logger.info("="*80)

@@ -42,7 +42,7 @@ app = HybridRAGApplication()
 # Delete and recreate collection
 logger.info("Deleting old collection...")
 app.recreate_collection()
-logger.info("✓ Collection recreated")
+logger.info("[OK] Collection recreated")
 logger.info("")
 
 # Re-create indexes
@@ -58,7 +58,7 @@ logger.info(f"Loaded {len(docs)} documents")
 logger.info("")
 
 final_count = app.index_documents(docs, skip_duplicates=False)
-logger.info(f"✓ Indexed {final_count} chunks")
+logger.info(f"[OK] Indexed {final_count} chunks")
 logger.info("")
 
 logger.info("="*80)

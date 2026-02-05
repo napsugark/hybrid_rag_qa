@@ -24,7 +24,7 @@ try:
     LANGFUSE_AVAILABLE = True
 except ImportError:
     LANGFUSE_AVAILABLE = False
-    print("⚠️  Langfuse not available. Install with: poetry add langfuse")
+    print("[WARN] Langfuse not available. Install with: poetry add langfuse")
 
 
 class RAGEvaluator:
@@ -37,10 +37,10 @@ class RAGEvaluator:
         # Initialize Langfuse client for evaluation tracking
         if LANGFUSE_AVAILABLE and config.LANGFUSE_ENABLED:
             self.langfuse = Langfuse()
-            print("✓ Langfuse evaluation tracking enabled")
+            print("[OK] Langfuse evaluation tracking enabled")
         else:
             self.langfuse = None
-            print("ℹ️  Running without Langfuse tracking")
+            print("[INFO] Running without Langfuse tracking")
         
         self.results = []
     
@@ -264,7 +264,7 @@ class RAGEvaluator:
     def _track_in_langfuse(self, eval_result: Dict[str, Any], trace_id: str):
         """Track evaluation scores in Langfuse"""
         if not trace_id:
-            print("⚠️  No Langfuse trace_id found, skipping score logging")
+            print("[WARN] No Langfuse trace_id found, skipping score logging")
             return
         try:
             # # Create a unique trace_id for this evaluation run
@@ -306,28 +306,28 @@ class RAGEvaluator:
             )
             
         except Exception as e:
-            print(f"⚠️  Failed to track in Langfuse: {e}")
+            print(f"[WARN] Failed to track in Langfuse: {e}")
     
     def _print_result(self, result: Dict[str, Any]):
         """Print evaluation result"""
         scores = result["scores"]
         
-        print(f"\n📊 Scores:")
+        print(f"\n[SCORES]")
         print(f"  Metadata Extraction: {scores['metadata_extraction']:.2%}")
         print(f"  Filter Usage:        {scores['filter_usage']:.2%}")
         print(f"  Retrieval Quality:   {scores['retrieval_quality']:.2%}")
         print(f"  Overall:             {scores['overall']:.2%}")
         
-        print(f"\n📈 Metrics:")
+        print(f"\n[METRICS]")
         print(f"  Documents Retrieved: {result.get('num_documents', 0)}")
         print(f"  Answer Length:       {result.get('answer_length', 0)} chars")
         print(f"  Time:                {result.get('elapsed_time', 0):.2f}s")
         
         if result.get("success"):
-            emoji = "✅" if scores["overall"] >= 0.7 else "⚠️"
-            print(f"\n{emoji} Result: {'PASS' if scores['overall'] >= 0.7 else 'NEEDS IMPROVEMENT'}")
+            status = "[PASS]" if scores["overall"] >= 0.7 else "[WARN]"
+            print(f"\n{status} Result: {'PASS' if scores['overall'] >= 0.7 else 'NEEDS IMPROVEMENT'}")
         else:
-            print(f"\n❌ Result: FAILED - {result.get('error')}")
+            print(f"\n[FAILED] Result: FAILED - {result.get('error')}")
     
     def run_evaluation(self, dataset: List[Dict[str, Any]] = None):
         """
@@ -360,7 +360,7 @@ class RAGEvaluator:
         # Flush Langfuse
         if self.langfuse:
             self.langfuse.flush()
-            print("\n✓ Evaluation results sent to Langfuse")
+            print("\n[OK] Evaluation results sent to Langfuse")
     
     def _print_summary(self):
         """Print evaluation summary"""

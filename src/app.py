@@ -25,11 +25,15 @@ from haystack.components.preprocessors import DocumentSplitter
 from haystack.components.writers import DocumentWriter
 from haystack.components.converters import TextFileToDocument, PyPDFToDocument
 from haystack.components.rankers import TransformersSimilarityRanker
+from haystack.components.joiners import DocumentJoiner
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from haystack.components.generators.chat import AzureOpenAIChatGenerator
 from .utils import format_time
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
-from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
+from haystack_integrations.components.retrievers.qdrant import (
+    QdrantEmbeddingRetriever,
+    QdrantSparseEmbeddingRetriever,
+)
 
 from components.metadata_enricher import MetadataEnricher
 from components.summarizer import DocumentSummarizer
@@ -246,7 +250,7 @@ class HybridRAGApplication:
                     "type_detector",
                     DocumentTypeDetector()
                 )
-                self.logger.info("  ✓ Document type detection enabled")
+                self.logger.info("  [OK] Document type detection enabled")
             
             # 2. METADATA EXTRACTION - Extract from FULL DOCUMENT before chunking
             # This ensures all chunks inherit the same metadata (company, date, invoice_number, etc.)
@@ -257,9 +261,9 @@ class HybridRAGApplication:
                 if prompt_file and prompt_file.exists():
                     with open(prompt_file, "r", encoding="utf-8") as f:
                         metadata_prompt = f.read()
-                        self.logger.info(f"  ✓ Loaded metadata extraction prompt from {prompt_file.name}")
+                        self.logger.info(f"  [OK] Loaded metadata extraction prompt from {prompt_file.name}")
                 else:
-                    self.logger.warning(f"  ⚠ Metadata prompt file not found: {prompt_file}")
+                    self.logger.warning(f"  [WARN] Metadata prompt file not found: {prompt_file}")
                     metadata_prompt = None  # Will use MetadataEnricher's default
                 
                 self.indexing_pipeline.add_component(
@@ -275,7 +279,7 @@ class HybridRAGApplication:
                         prompt_template=metadata_prompt,
                     ),
                 )
-                self.logger.info("  ✓ Metadata extraction enabled")
+                self.logger.info("  [OK] Metadata extraction enabled")
             
             # 3. SEMANTIC CHUNKING or Fixed-Size Chunking
             if getattr(config, "USE_SEMANTIC_CHUNKING", True):
@@ -288,7 +292,7 @@ class HybridRAGApplication:
                         overlap_size=getattr(config, "SEMANTIC_CHUNK_OVERLAP", 50),
                     ),
                 )
-                self.logger.info("  ✓ Semantic chunking enabled (logical sections)")
+                self.logger.info("  [OK] Semantic chunking enabled (logical sections)")
             else:
                 # Fall back to old fixed-size chunking
                 self.indexing_pipeline.add_component(
@@ -299,7 +303,7 @@ class HybridRAGApplication:
                         split_overlap=config.CHUNK_OVERLAP,
                     ),
                 )
-                self.logger.info("  ⚠ Using legacy fixed-size chunking")
+                self.logger.info("  [WARN] Using legacy fixed-size chunking")
             
             # 4. BOILERPLATE FILTERING - Remove legal/payment text before embedding
             if getattr(config, "USE_BOILERPLATE_FILTER", True):
@@ -312,7 +316,7 @@ class HybridRAGApplication:
                         skip_payment_sections=getattr(config, "SKIP_PAYMENT_SECTIONS", True),
                     ),
                 )
-                self.logger.info("  ✓ Boilerplate filtering enabled")
+                self.logger.info("  [OK] Boilerplate filtering enabled")
 
             # 5. SUMMARIZATION - Optional per-chunk summaries
             if config.ENABLE_SUMMARIZATION:
@@ -328,7 +332,7 @@ class HybridRAGApplication:
                         summary_style=config.SUMMARY_STYLE,
                     ),
                 )
-                self.logger.info("  ✓ Summarization enabled")
+                self.logger.info("  [OK] Summarization enabled")
 
             # 6. EMBEDDERS - Dense + Sparse
             self.indexing_pipeline.add_component(
@@ -345,7 +349,7 @@ class HybridRAGApplication:
             self.indexing_pipeline.add_component(
                 "writer", DocumentWriter(document_store=self.document_store)
             )
-            self.logger.info("  ✓ Dense + Sparse embedders configured")
+            self.logger.info("  [OK] Dense + Sparse embedders configured")
 
             # CONNECT COMPONENTS IN PRODUCTION PIPELINE
             # Flow: type_detector → metadata_enricher → semantic_chunker → boilerplate_filter → summarizer → embedders → writer
@@ -402,31 +406,61 @@ class HybridRAGApplication:
     # QUERY PIPELINES
     # ===============================
     def _build_query_pipelines(self):
-        """Build retrieval and generation pipelines separately"""
-        self.logger.info("Building retrieval and generation pipelines...")
+        """Build retrieval and generation pipelines separately
+        
+        Architecture matches deepset/haystack-rag-app:
+        - Sparse retriever (BM25-like) with FULL original query
+        - Dense retriever (embedding) with FULL original query  
+        - DocumentJoiner to merge results (like deepset)
+        - Optional reranker
+        """
+        self.logger.info("Building retrieval and generation pipelines (deepset-style)...")
 
         try:
-            # ---- RETRIEVAL PIPELINE ----
+            # ---- RETRIEVAL PIPELINE (DEEPSET ARCHITECTURE) ----
             self.retrieval_pipeline = Pipeline()
-            self.retrieval_pipeline.add_component(
-                "dense_embedder",
-                SentenceTransformersTextEmbedder(
-                    model=config.DENSE_EMBEDDING_MODEL,
-                    device=ComponentDevice.from_str(config.EMBEDDING_DEVICE),
-                    prefix=config.DENSE_EMBEDDING_PREFIX,
-                ),
+            
+            # Store dense embedder as instance variable for reuse
+            self.dense_embedder = SentenceTransformersTextEmbedder(
+                model=config.DENSE_EMBEDDING_MODEL,
+                device=ComponentDevice.from_str(config.EMBEDDING_DEVICE),
+                prefix=config.DENSE_EMBEDDING_PREFIX,
             )
+            self.retrieval_pipeline.add_component("dense_embedder", self.dense_embedder)
+            
+            # Sparse embedder for BM25-like retrieval
             self.retrieval_pipeline.add_component(
                 "sparse_embedder",
                 FastembedSparseTextEmbedder(model=config.SPARSE_EMBEDDING_MODEL),
             )
+            
+            # SEPARATE RETRIEVERS (like deepset's BM25 + Embedding retrievers)
+            retriever_top_k = config.TOP_K * 2 if config.USE_RERANKER else config.TOP_K
+            
+            # Sparse retriever (BM25-like) - uses sparse embeddings
             self.retrieval_pipeline.add_component(
-                "retriever",
-                QdrantHybridRetriever(
+                "sparse_retriever",
+                QdrantSparseEmbeddingRetriever(
                     document_store=self.document_store,
-                    top_k=config.TOP_K if not config.USE_RERANKER else config.TOP_K * 2,
+                    top_k=retriever_top_k,
                 ),
             )
+            
+            # Dense retriever (embedding-based)
+            self.retrieval_pipeline.add_component(
+                "dense_retriever",
+                QdrantEmbeddingRetriever(
+                    document_store=self.document_store,
+                    top_k=retriever_top_k,
+                ),
+            )
+            
+            # DocumentJoiner - merges results from both retrievers (like deepset)
+            self.retrieval_pipeline.add_component(
+                "document_joiner",
+                DocumentJoiner(join_mode="concatenate"),
+            )
+            
             if config.USE_RERANKER:
                 self.retrieval_pipeline.add_component(
                     "reranker",
@@ -434,16 +468,30 @@ class HybridRAGApplication:
                         model=config.RERANKER_MODEL, top_k=config.RERANKER_TOP_K
                     ),
                 )
+            
+            # Connect components (matching deepset architecture)
             self.retrieval_pipeline.connect(
-                "dense_embedder.embedding", "retriever.query_embedding"
+                "sparse_embedder.sparse_embedding", "sparse_retriever.query_sparse_embedding"
             )
             self.retrieval_pipeline.connect(
-                "sparse_embedder.sparse_embedding", "retriever.query_sparse_embedding"
+                "dense_embedder.embedding", "dense_retriever.query_embedding"
+            )
+            self.retrieval_pipeline.connect(
+                "sparse_retriever.documents", "document_joiner.documents"
+            )
+            self.retrieval_pipeline.connect(
+                "dense_retriever.documents", "document_joiner.documents"
             )
             if config.USE_RERANKER:
                 self.retrieval_pipeline.connect(
-                    "retriever.documents", "reranker.documents"
+                    "document_joiner.documents", "reranker.documents"
                 )
+            
+            self.logger.info("  [OK] Sparse retriever (BM25-like) configured")
+            self.logger.info("  [OK] Dense retriever (embedding) configured")
+            self.logger.info("  [OK] DocumentJoiner (concatenate mode) configured")
+            if config.USE_RERANKER:
+                self.logger.info(f"  [OK] Reranker configured: {config.RERANKER_MODEL}")
 
             # ---- GENERATION PIPELINE ----
             # Load RAG prompts from files
@@ -650,52 +698,57 @@ class HybridRAGApplication:
     def _filter_by_score(
         self, retrieved_docs: List[Document], query: str, extracted_filters: Optional[Dict]
     ) -> List[Document]:
-        """Apply score-based filtering with metadata-aware logic"""
-        MIN_SCORE = 0.05
-        MAX_DOCS = 5
+        """Apply minimal filtering - deepset-style (no aggressive score filtering)
         
-        # Determine if this is a metadata-heavy query
-        is_metadata_heavy = bool(extracted_filters) and len(query.split()) <= 5
+        Deepset approach: Pass all documents, let reranker/LLM handle relevance.
+        We only deduplicate and limit count.
+        """
+        MAX_DOCS = config.RERANKER_TOP_K if config.USE_RERANKER else config.TOP_K
         
-        if is_metadata_heavy:
-            self.logger.info("Metadata-heavy query detected - relaxing score filter")
-            filtered_docs = retrieved_docs
-        else:
-            filtered_docs = []
-            for d in retrieved_docs:
-                score = getattr(d, "score", None)
-                if score is None:
-                    self.logger.warning("Document without score found, keeping it")
-                    filtered_docs.append(d)
-                elif score >= MIN_SCORE:
-                    filtered_docs.append(d)
-                else:
-                    self.logger.debug(f"Filtered out document with score {score:.3f} < {MIN_SCORE}")
+        # Deduplicate by document ID (important when joining sparse+dense results)
+        seen_ids = set()
+        unique_docs = []
+        for d in retrieved_docs:
+            doc_id = d.id if d.id else hash(d.content[:100])
+            if doc_id not in seen_ids:
+                seen_ids.add(doc_id)
+                unique_docs.append(d)
         
-        self.logger.info(f"Documents after score filtering: {len(filtered_docs)} (from {len(retrieved_docs)})")
+        self.logger.info(f"Documents after deduplication: {len(unique_docs)} (from {len(retrieved_docs)})")
         
-        # Sort and limit
-        filtered_docs = sorted(
-            filtered_docs,
+        # Sort by score and limit (no score threshold - deepset-style)
+        sorted_docs = sorted(
+            unique_docs,
             key=lambda d: getattr(d, "score", 0),
             reverse=True
         )[:MAX_DOCS]
         
-        return filtered_docs
+        return sorted_docs
     
     @observe(name="document_retrieval")
     def _retrieve_documents(
         self, query: str, metadata: Dict[str, Any]
     ) -> tuple[List[Document], float]:
-        """Retrieve and filter documents with caching and error handling"""
+        """Retrieve documents using deepset-style architecture
+        
+        Key difference from before: 
+        - ALWAYS use ORIGINAL query for embeddings (not modified search_query)
+        - Filters are optional enhancement, not primary retrieval method
+        """
         retrieval_start = time.time()
         
-        extracted_filters = metadata["filters"]
-        search_query = metadata["search_query"]
+        # IMPORTANT: Use ORIGINAL query for embeddings (deepset-style)
+        # Metadata filters are just for narrowing, not for query modification
+        original_query = query  # Always use original, not metadata["search_query"]
+        extracted_filters = metadata.get("filters")
         
-        # Check retrieval cache first
+        self.logger.info(f"Retrieving with ORIGINAL query: '{original_query}'")
+        if extracted_filters:
+            self.logger.info(f"Additional filters: {extracted_filters}")
+        
+        # Check retrieval cache (use original query as key)
         cached_docs = self.cache_manager.retrieval_cache.get(
-            query=search_query,
+            query=original_query,
             filters=extracted_filters,
             top_k=config.TOP_K
         )
@@ -703,23 +756,19 @@ class HybridRAGApplication:
             self.logger.info(f"Retrieved {len(cached_docs)} documents from cache")
             return cached_docs, time.time() - retrieval_start
         
-        # Check embedding cache for dense and sparse
-        dense_embedding = self.cache_manager.embedding_cache.get_dense(search_query)
-        sparse_embedding = self.cache_manager.embedding_cache.get_sparse(search_query)
+        # Build retrieval inputs for new deepset-style pipeline
+        retrieval_inputs = {
+            "dense_embedder": {"text": original_query},
+            "sparse_embedder": {"text": original_query},
+        }
         
-        # Build retrieval inputs
-        retrieval_inputs = {}
-        
-        # Use cached embeddings or generate new ones
-        if dense_embedding is None or sparse_embedding is None:
-            retrieval_inputs["dense_embedder"] = {"text": search_query}
-            retrieval_inputs["sparse_embedder"] = {"text": search_query}
-        
+        # Add filters to BOTH retrievers if present (optional enhancement)
         if extracted_filters:
-            retrieval_inputs["retriever"] = {"filters": extracted_filters}
+            retrieval_inputs["sparse_retriever"] = {"filters": extracted_filters}
+            retrieval_inputs["dense_retriever"] = {"filters": extracted_filters}
         
         if config.USE_RERANKER:
-            retrieval_inputs["reranker"] = {"query": search_query}
+            retrieval_inputs["reranker"] = {"query": original_query}
         
         # Run retrieval with rate limiting and circuit breaker
         try:
@@ -729,57 +778,60 @@ class HybridRAGApplication:
                     retrieval_inputs
                 )
         except Exception as e:
-            self.logger.error(f"Retrieval failed: {e}", exc_info=True)
-            # Return graceful degradation - empty results
-            return [], time.time() - retrieval_start
+            self.logger.warning(f"Retrieval with filters failed: {e}")
+            
+            # FALLBACK: Retry WITHOUT filters (deepset-style - filters are optional)
+            if extracted_filters:
+                self.logger.info("Retrying retrieval WITHOUT filters...")
+                retrieval_inputs_no_filters = {
+                    "dense_embedder": {"text": original_query},
+                    "sparse_embedder": {"text": original_query},
+                }
+                if config.USE_RERANKER:
+                    retrieval_inputs_no_filters["reranker"] = {"query": original_query}
+                
+                try:
+                    with self.qdrant_rate_limiter:
+                        retrieval_result = self.qdrant_circuit_breaker.call(
+                            self.retrieval_pipeline.run,
+                            retrieval_inputs_no_filters
+                        )
+                    self.logger.info("Retrieval succeeded without filters")
+                except Exception as e2:
+                    self.logger.error(f"Retrieval failed even without filters: {e2}", exc_info=True)
+                    return [], time.time() - retrieval_start
+            else:
+                self.logger.error(f"Retrieval failed: {e}", exc_info=True)
+                return [], time.time() - retrieval_start
         
-        # Cache embeddings if they were generated
+        # Cache embeddings with original query as key
         if "dense_embedder" in retrieval_result:
             dense_emb = retrieval_result["dense_embedder"].get("embedding")
             if dense_emb:
-                self.cache_manager.embedding_cache.put_dense(search_query, dense_emb)
+                self.cache_manager.embedding_cache.put_dense(original_query, dense_emb)
         if "sparse_embedder" in retrieval_result:
             sparse_emb = retrieval_result["sparse_embedder"].get("sparse_embedding")
             if sparse_emb:
-                self.cache_manager.embedding_cache.put_sparse(search_query, sparse_emb)
+                self.cache_manager.embedding_cache.put_sparse(original_query, sparse_emb)
         
+        # Get results from reranker (if enabled) or document_joiner (deepset-style)
         if config.USE_RERANKER:
             retrieved_docs = retrieval_result.get("reranker", {}).get("documents", [])
         else:
-            retrieved_docs = retrieval_result.get("retriever", {}).get("documents", [])
+            retrieved_docs = retrieval_result.get("document_joiner", {}).get("documents", [])
         
         retrieval_time = time.time() - retrieval_start
-        self.logger.info(f"Retrieved {len(retrieved_docs)} documents in {retrieval_time:.2f}s")
+        self.logger.info(f"Retrieved {len(retrieved_docs)} raw documents in {retrieval_time:.2f}s")
         
-        # Apply score filtering
+        # Apply deduplication and limit (no aggressive score filtering - deepset-style)
         filtered_docs = self._filter_by_score(retrieved_docs, query, extracted_filters)
         
-        # Try metadata-only fallback if needed
-        if not filtered_docs and extracted_filters:
-            self.logger.info("Fallback: trying metadata-only retrieval")
-            retrieval_inputs_meta = {
-                "dense_embedder": {"text": ""},
-                "sparse_embedder": {"text": ""},
-                "retriever": {"filters": extracted_filters},
-            }
-            if config.USE_RERANKER:
-                retrieval_inputs_meta["reranker"] = {"query": ""}
-            
-            try:
-                with self.qdrant_rate_limiter:
-                    fallback_result = self.qdrant_circuit_breaker.call(
-                        self.retrieval_pipeline.run,
-                        retrieval_inputs_meta
-                    )
-                filtered_docs = fallback_result.get("retriever", {}).get("documents", [])
-                self.logger.info(f"Metadata-only fallback retrieved {len(filtered_docs)} documents")
-            except Exception as e:
-                self.logger.error(f"Fallback retrieval failed: {e}")
+        self.logger.info(f"Final documents after processing: {len(filtered_docs)}")
         
-        # Cache retrieval results
+        # Cache retrieval results (use original query as key)
         if filtered_docs:
             self.cache_manager.retrieval_cache.put(
-                query=search_query,
+                query=original_query,
                 documents=filtered_docs,
                 filters=extracted_filters,
                 top_k=config.TOP_K

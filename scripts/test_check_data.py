@@ -59,4 +59,4 @@ if info.payload_schema:
     for field, schema in info.payload_schema.items():
         print(f"    - {field}: {schema}")
 else:
-    print("    ⚠️  NO INDEXES FOUND!")
+    print("    [WARN] NO INDEXES FOUND!")

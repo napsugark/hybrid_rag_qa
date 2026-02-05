@@ -319,13 +319,13 @@ Now analyze this query and respond ONLY with valid JSON:
 
         except json.JSONDecodeError as e:
             # JSON parsing failed - log and use fallback
-            print(f"⚠️  JSON parsing failed: {e}")
+            print(f"[WARN] JSON parsing failed: {e}")
             print(f"LLM output: {llm_output[:200]}")
             return self._fallback_extraction(query)
 
         except Exception as e:
             # General error - log and use fallback
-            print(f"⚠️  Query metadata extraction failed: {e}")
+            print(f"[WARN] Query metadata extraction failed: {e}")
             return self._fallback_extraction(query)
 
     def _build_qdrant_filters(self, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:

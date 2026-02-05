@@ -50,10 +50,10 @@ old_indexes = [
     "boilerplate_score",
 ]
 
-logger.info(\"=\"*80)
-logger.info(\"CLEANING UP OLD QDRANT INDEXES\")
-logger.info(\"=\"*80)
-logger.info(\"\")
+logger.info("="*80)
+logger.info("CLEANING UP OLD QDRANT INDEXES")
+logger.info("="*80)
+logger.info("")
 
 for field_name in old_indexes:
     try:
@@ -62,12 +62,12 @@ for field_name in old_indexes:
             collection_name=config.QDRANT_COLLECTION,
             field_name=field_name,
         )
-        print("✓ Deleted")
+        print("[OK] Deleted")
     except Exception as e:
         if "not found" in str(e).lower():
-            print("⚠ Not found (already deleted)")
+            print("[WARN] Not found (already deleted)")
         else:
-            print(f"✗ Failed: {e}")
+            print(f"[FAILED] {e}")
 
 print()
 print("="*80)
