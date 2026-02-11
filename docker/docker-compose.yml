@@ -1,0 +1,303 @@
+# ============================================================
+# docker-compose.yml — Hybrid RAG stack
+#
+# Services:
+#   rag            – FastAPI RAG server (this project)
+#   qdrant         – Qdrant vector database
+#   ollama         – Local LLM server (optional)
+#   langfuse-web   – Langfuse UI & API (observability)
+#   langfuse-worker– Langfuse background worker
+#   langfuse-pg    – PostgreSQL for Langfuse
+#   langfuse-redis – Redis for Langfuse
+#   langfuse-ch    – ClickHouse for Langfuse
+#   langfuse-minio – MinIO (S3) for Langfuse
+#
+# The "mayan" network is external — Mayan EDMS must already
+# have created it. Mayan calls http://rag:8000/index and /query.
+#
+# Usage:
+#   cd docker/
+#   cp .env.docker ../.env     # fill in real secrets
+#   docker compose up -d --build
+# ============================================================
+name: hybrid-rag
+
+services:
+
+  # --------------------------------------------------------
+  # RAG API (this project)
+  # --------------------------------------------------------
+  rag:
+    build:
+      context: ..              # project root (one level up from docker/)
+      dockerfile: docker/Dockerfile
+    container_name: rag
+    env_file: ../.env
+    environment:
+      - HF_HUB_DISABLE_TELEMETRY=1   # suppress "unauthenticated requests" warning
+    ports:
+      - "8001:8000"            # external:internal — access docs at http://localhost:8001/docs
+    volumes:
+      - model-cache:/root/.cache    # HuggingFace / fastembed model cache
+      - rag-logs:/app/logs
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+    networks:
+      - mayan
+    restart: unless-stopped
+
+  # --------------------------------------------------------
+  # Qdrant vector database
+  # --------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"            # REST API
+      - "6334:6334"            # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - mayan
+    restart: unless-stopped
+
+  # --------------------------------------------------------
+  # Ollama local LLM (optional)
+  # Only needed when MODEL_TO_USE=OLLAMA
+  # --------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+      - ../docker/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/ollama-entrypoint.sh"]
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+    # ---- GPU passthrough (uncomment for NVIDIA GPU) ----
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    networks:
+      - mayan
+    restart: unless-stopped
+
+
+  # ========================================================
+  # LANGFUSE — Observability & Tracing
+  # ========================================================
+
+  # ---- Langfuse Web UI (port 3000) ----
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    container_name: rag-langfuse-web
+    restart: always
+    depends_on: &langfuse-deps
+      langfuse-pg:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-ch:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    ports:
+      - "3111:3000"
+    environment: &langfuse-env
+      HOSTNAME: "0.0.0.0"
+      NEXTAUTH_URL: http://localhost:3111
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-nextauth-secret}
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-pg:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-changeme-salt-value}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      # ClickHouse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-ch:9000
+      CLICKHOUSE_URL: http://langfuse-ch:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CH_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # MinIO (S3)
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9190
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      # Redis
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-secret}
+      REDIS_TLS_ENABLED: "false"
+      # Auto-initialize org, project, user, and API keys on first boot
+      LANGFUSE_INIT_ORG_ID: rag-org
+      LANGFUSE_INIT_ORG_NAME: RAG Organization
+      LANGFUSE_INIT_PROJECT_ID: rag-project
+      LANGFUSE_INIT_PROJECT_NAME: Hybrid RAG
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev-public}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local-dev-secret}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_EMAIL:-admin@local.dev}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_PASSWORD:-admin1234}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks:
+      - mayan
+
+  # ---- Langfuse Worker ----
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    container_name: rag-langfuse-worker
+    restart: always
+    depends_on: *langfuse-deps
+    environment:
+      <<: *langfuse-env
+    networks:
+      - mayan
+
+  # ---- PostgreSQL for Langfuse ----
+  langfuse-pg:
+    image: docker.io/postgres:17
+    container_name: rag-langfuse-pg
+    restart: always
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mayan
+
+  # ---- Redis for Langfuse ----
+  langfuse-redis:
+    image: docker.io/redis:7
+    container_name: rag-langfuse-redis
+    restart: always
+    command: >-
+      --requirepass ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-secret}
+      --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    networks:
+      - mayan
+
+  # ---- ClickHouse for Langfuse ----
+  langfuse-ch:
+    image: docker.io/clickhouse/clickhouse-server
+    container_name: rag-langfuse-ch
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CH_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse-ch-data:/var/lib/clickhouse
+      - langfuse-ch-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    networks:
+      - mayan
+
+  # ---- MinIO (S3) for Langfuse ----
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    container_name: rag-langfuse-minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+    volumes:
+      - langfuse-minio-data:/data
+    ports:
+      - "9190:9000"           # S3 API (9090 taken by existing Langfuse)
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+    networks:
+      - mayan
+
+
+# ============================================================
+# Volumes — persist data across container restarts
+# ============================================================
+volumes:
+  qdrant-data:
+    driver: local
+  model-cache:
+    driver: local
+  ollama-data:
+    driver: local
+  rag-logs:
+    driver: local
+  langfuse-pg-data:
+    driver: local
+  langfuse-ch-data:
+    driver: local
+  langfuse-ch-logs:
+    driver: local
+  langfuse-minio-data:
+    driver: local
+
+
+# ============================================================
+# Network — join Mayan's existing network
+# ============================================================
+networks:
+  mayan:
+    external: true
+    name: mayan_mayan     # actual name created by Mayan's docker compose
+    # If Mayan hasn't created the network yet, or you want a
+    # standalone stack, comment "external: true" + "name:" and uncomment:
+    # driver: bridge

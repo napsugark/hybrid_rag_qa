@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+
+# Virtual environments
+.venv
+venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Caches
+.cache
+.mypy_cache
+.pytest_cache
+
+# Logs
+logs/
+src/logs/
+*.log
+
+# Data (documents are indexed from Mayan, not bundled)
+data/
+
+# Docker
+.dockerignore
+docker/
+
+# Docs & tests (not needed in image)
+docs/
+evaluation/
+notebooks/
+langfuse/
+
+# Env files (secrets - passed at runtime)
+.env
+.env.*
