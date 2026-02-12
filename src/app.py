@@ -24,7 +24,7 @@ from haystack.utils import Secret, ComponentDevice
 from haystack.components.preprocessors import DocumentSplitter
 from haystack.components.writers import DocumentWriter
 from haystack.components.converters import TextFileToDocument, PyPDFToDocument
-from haystack.components.rankers import TransformersSimilarityRanker
+from haystack.components.rankers import SentenceTransformersSimilarityRanker
 from haystack.components.joiners import DocumentJoiner
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from haystack.components.generators.chat import AzureOpenAIChatGenerator
@@ -35,9 +35,9 @@ from haystack_integrations.components.retrievers.qdrant import (
     QdrantSparseEmbeddingRetriever,
 )
 
-from components.metadata_enricher import MetadataEnricher
-from components.summarizer import DocumentSummarizer
-from components.query_metadata_extractor import RomanianQueryMetadataExtractor
+from .components.metadata_enricher import MetadataEnricher
+from .components.summarizer import DocumentSummarizer
+from .components.query_metadata_extractor import RomanianQueryMetadataExtractor
 from .langfuse_tracker import setup_langfuse, get_observe_decorator
 from . import config
 
@@ -50,9 +50,10 @@ from .resilience import (
 )
 from .cache import CacheManager
 
-# Get observe decorator and Langfuse client
-observe = get_observe_decorator()
+# Initialize Langfuse client FIRST (sets up OTel tracer for @observe)
 langfuse_client = setup_langfuse()
+# Then get the @observe decorator
+observe = get_observe_decorator()
 
 def setup_logging() -> logging.Logger:
     """Setup logging configuration"""
@@ -103,11 +104,13 @@ class HybridRAGApplication:
         self.qdrant_api_key = qdrant_api_key or config.QDRANT_API_KEY
         self.collection_name = collection_name or config.QDRANT_COLLECTION
 
-        if not self.qdrant_url or not self.qdrant_api_key:
+        if not self.qdrant_url:
             raise ValueError(
-                "Qdrant credentials not found. Set QDRANT_URL and QDRANT_API_KEY "
-                "in .env or pass them as arguments."
+                "Qdrant URL not found. Set QDRANT_ENDPOINT "
+                "in .env or pass qdrant_url as argument."
             )
+        if not self.qdrant_api_key:
+            self.logger.info("No Qdrant API key provided — connecting without authentication (local mode)")
 
         self.logger.info(f"Configuration:")
         self.logger.info(f"  - Qdrant URL: {self.qdrant_url}")
@@ -183,6 +186,20 @@ class HybridRAGApplication:
         self._build_indexing_pipeline()
         self._build_query_pipelines()
 
+        # Warm up pipelines — download and load all models eagerly
+        # so the first request isn't penalized by model downloads
+        self.logger.info("Warming up pipelines (downloading/loading models)...")
+        try:
+            self.retrieval_pipeline.warm_up()
+            self.logger.info("  [OK] Retrieval pipeline warmed up")
+        except Exception as e:
+            self.logger.warning(f"  [WARN] Retrieval pipeline warm_up failed: {e}")
+        try:
+            self.generation_pipeline.warm_up()
+            self.logger.info("  [OK] Generation pipeline warmed up")
+        except Exception as e:
+            self.logger.warning(f"  [WARN] Generation pipeline warm_up failed: {e}")
+
         self.logger.info("Hybrid RAG Application initialized successfully")
         self.logger.info("=" * 80)
 
@@ -208,17 +225,19 @@ class HybridRAGApplication:
             ),
         )
         def connect_to_qdrant():
+            qdrant_kwargs = dict(
+                url=self.qdrant_url,
+                index=self.collection_name,
+                embedding_dim=config.QDRANT_EMBEDDING_DIM,
+                use_sparse_embeddings=True,
+                recreate_index=False,
+                return_embedding=False,
+                wait_result_from_api=True,
+            )
+            if self.qdrant_api_key:
+                qdrant_kwargs["api_key"] = Secret.from_token(self.qdrant_api_key)
             return self.qdrant_circuit_breaker.call(
-                lambda: QdrantDocumentStore(
-                    url=self.qdrant_url,
-                    api_key=Secret.from_token(self.qdrant_api_key),
-                    index=self.collection_name,
-                    embedding_dim=config.QDRANT_EMBEDDING_DIM,
-                    use_sparse_embeddings=True,
-                    recreate_index=False,
-                    return_embedding=False,
-                    wait_result_from_api=True,
-                )
+                lambda: QdrantDocumentStore(**qdrant_kwargs)
             )
         
         try:
@@ -245,7 +264,7 @@ class HybridRAGApplication:
             
             # 1. DOCUMENT TYPE DETECTION (invoice/contract/receipt)
             if getattr(config, "USE_DOCUMENT_TYPE_DETECTION", True):
-                from components.document_type_detector import DocumentTypeDetector
+                from .components.document_type_detector import DocumentTypeDetector
                 self.indexing_pipeline.add_component(
                     "type_detector",
                     DocumentTypeDetector()
@@ -283,7 +302,7 @@ class HybridRAGApplication:
             
             # 3. SEMANTIC CHUNKING or Fixed-Size Chunking
             if getattr(config, "USE_SEMANTIC_CHUNKING", True):
-                from components.semantic_chunker import SemanticDocumentChunker
+                from .components.semantic_chunker import SemanticDocumentChunker
                 self.indexing_pipeline.add_component(
                     "semantic_chunker",
                     SemanticDocumentChunker(
@@ -307,7 +326,7 @@ class HybridRAGApplication:
             
             # 4. BOILERPLATE FILTERING - Remove legal/payment text before embedding
             if getattr(config, "USE_BOILERPLATE_FILTER", True):
-                from components.boilerplate_filter import BoilerplateFilter
+                from .components.boilerplate_filter import BoilerplateFilter
                 self.indexing_pipeline.add_component(
                     "boilerplate_filter",
                     BoilerplateFilter(
@@ -464,7 +483,7 @@ class HybridRAGApplication:
             if config.USE_RERANKER:
                 self.retrieval_pipeline.add_component(
                     "reranker",
-                    TransformersSimilarityRanker(
+                    SentenceTransformersSimilarityRanker(
                         model=config.RERANKER_MODEL, top_k=config.RERANKER_TOP_K
                     ),
                 )
@@ -828,6 +847,38 @@ class HybridRAGApplication:
         
         self.logger.info(f"Final documents after processing: {len(filtered_docs)}")
         
+        # FALLBACK: If filters produced 0 results, retry WITHOUT filters (deepset-style)
+        if not filtered_docs and extracted_filters:
+            self.logger.warning(
+                f"Filters returned 0 results. Retrying WITHOUT filters for broader search. "
+                f"Original filters: {extracted_filters}"
+            )
+            retrieval_inputs_no_filters = {
+                "dense_embedder": {"text": original_query},
+                "sparse_embedder": {"text": original_query},
+            }
+            if config.USE_RERANKER:
+                retrieval_inputs_no_filters["reranker"] = {"query": original_query}
+            
+            try:
+                with self.qdrant_rate_limiter:
+                    retrieval_result_fallback = self.qdrant_circuit_breaker.call(
+                        self.retrieval_pipeline.run,
+                        retrieval_inputs_no_filters
+                    )
+                
+                if config.USE_RERANKER:
+                    fallback_docs = retrieval_result_fallback.get("reranker", {}).get("documents", [])
+                else:
+                    fallback_docs = retrieval_result_fallback.get("document_joiner", {}).get("documents", [])
+                
+                filtered_docs = self._filter_by_score(fallback_docs, query, None)
+                self.logger.info(
+                    f"Fallback retrieval (no filters) returned {len(filtered_docs)} documents"
+                )
+            except Exception as e_fallback:
+                self.logger.error(f"Fallback retrieval also failed: {e_fallback}", exc_info=True)
+        
         # Cache retrieval results (use original query as key)
         if filtered_docs:
             self.cache_manager.retrieval_cache.put(
@@ -1018,13 +1069,30 @@ class HybridRAGApplication:
     def get_document_count(self) -> int:
         return self.document_store.count_documents()
 
+    def _ensure_collection_exists(self):
+        """Check if the Qdrant collection exists; recreate it if missing.
+        
+        Handles the case where the collection was deleted externally
+        (e.g. manual cleanup) while the app was running.
+        """
+        try:
+            self.document_store.count_documents()
+        except Exception as e:
+            error_msg = str(e)
+            if "doesn't exist" in error_msg or "Not Found" in error_msg:
+                self.logger.warning(
+                    f"Collection '{self.collection_name}' not found — recreating."
+                )
+                self.recreate_collection()
+            else:
+                raise
+
     def recreate_collection(self):
         self.logger.warning(
             f"Recreating collection '{self.collection_name}' - this will delete all data!"
         )
-        self.document_store = QdrantDocumentStore(
+        qdrant_kwargs = dict(
             url=self.qdrant_url,
-            api_key=Secret.from_token(self.qdrant_api_key),
             index=self.collection_name,
             embedding_dim=config.QDRANT_EMBEDDING_DIM,
             use_sparse_embeddings=True,
@@ -1032,6 +1100,9 @@ class HybridRAGApplication:
             return_embedding=False,
             wait_result_from_api=True,
         )
+        if self.qdrant_api_key:
+            qdrant_kwargs["api_key"] = Secret.from_token(self.qdrant_api_key)
+        self.document_store = QdrantDocumentStore(**qdrant_kwargs)
         self._build_indexing_pipeline()
         self._build_query_pipelines()
 
@@ -1061,4 +1132,302 @@ class HybridRAGApplication:
                 "state": self.ollama_circuit_breaker.state,
                 "failure_count": self.ollama_circuit_breaker._failure_count,
             },
+        }
+
+    # ===============================
+    # MAYAN EDMS INTEGRATION
+    # ===============================
+    
+    def delete_all_versions_of_document(self, document_id: int) -> int:
+        """
+        Delete ALL chunks for a document_id (all versions).
+        Ensures only the latest version is stored after re-indexing.
+        
+        Args:
+            document_id: The Mayan document ID
+            
+        Returns:
+            Number of chunks deleted
+        """
+        self.logger.info(f"Deleting all versions for document_id={document_id}")
+        
+        try:
+            filters = {
+                "field": "meta.document_id",
+                "operator": "==",
+                "value": document_id,
+            }
+            
+            docs_to_delete = self.document_store.filter_documents(filters=filters)
+            
+            if not docs_to_delete:
+                self.logger.info(f"No existing chunks found for document_id={document_id}")
+                return 0
+            
+            # Log which versions are being removed
+            old_versions = set(d.meta.get("document_version_id") for d in docs_to_delete)
+            self.logger.info(
+                f"Removing {len(docs_to_delete)} chunks from "
+                f"{len(old_versions)} previous version(s): {old_versions}"
+            )
+            
+            doc_ids = [doc.id for doc in docs_to_delete if doc.id]
+            if doc_ids:
+                self.document_store.delete_documents(document_ids=doc_ids)
+                self.cache_manager.retrieval_cache.invalidate_all()
+                
+            return len(doc_ids)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to delete documents: {e}", exc_info=True)
+            raise
+
+    def delete_chunks_by_content_hash(self, content_hash: str, exclude_document_id: int) -> int:
+        """
+        Delete chunks that have the same content_hash but a DIFFERENT document_id.
+        
+        Handles the case where a file is deleted from Mayan and re-uploaded,
+        getting a new document_id. The old chunks (from the old document_id)
+        would otherwise remain as orphans.
+        
+        Args:
+            content_hash: SHA-256 hash of the raw file bytes
+            exclude_document_id: The current document_id (don't delete these)
+            
+        Returns:
+            Number of chunks deleted
+        """
+        try:
+            filters = {
+                "field": "meta.content_hash",
+                "operator": "==",
+                "value": content_hash,
+            }
+            
+            matching_docs = self.document_store.filter_documents(filters=filters)
+            
+            # Only delete chunks from OTHER document_ids
+            to_delete = [
+                doc for doc in matching_docs
+                if doc.meta.get("document_id") != exclude_document_id and doc.id
+            ]
+            
+            if not to_delete:
+                return 0
+            
+            old_doc_ids = set(d.meta.get("document_id") for d in to_delete)
+            self.logger.info(
+                f"Content hash {content_hash[:12]}... found in {len(to_delete)} chunks "
+                f"from old document_id(s) {old_doc_ids} — deleting orphans"
+            )
+            
+            self.document_store.delete_documents(document_ids=[d.id for d in to_delete])
+            self.cache_manager.retrieval_cache.invalidate_all()
+            return len(to_delete)
+            
+        except Exception as e:
+            self.logger.warning(f"Content hash dedup check failed: {e}")
+            return 0
+    
+    def is_document_version_indexed(self, document_id: int, document_version_id: int) -> bool:
+        """
+        Check if a (document_id, document_version_id) pair already has chunks in the store.
+        
+        Args:
+            document_id: Mayan document ID
+            document_version_id: Mayan document version ID
+            
+        Returns:
+            True if chunks already exist for this exact document version
+        """
+        try:
+            filters = {
+                "operator": "AND",
+                "conditions": [
+                    {"field": "meta.document_id", "operator": "==", "value": document_id},
+                    {"field": "meta.document_version_id", "operator": "==", "value": document_version_id},
+                ],
+            }
+            existing = self.document_store.filter_documents(filters=filters)
+            return len(existing) > 0
+        except Exception as e:
+            self.logger.warning(f"Could not check existing version: {e}")
+            return False
+
+    def index_mayan_document(
+        self,
+        document: Document,
+        document_id: int,
+        document_version_id: int,
+        allowed_users: List[int],
+    ) -> Dict[str, Any]:
+        """
+        Index a document from Mayan EDMS — latest version only.
+        
+        Strategy: Only the most recent version of each document is stored.
+        
+        Logic:
+        1. If this exact (document_id, document_version_id) is already indexed → skip
+        2. Delete ALL previous versions of this document_id
+        3. Index the new version with Mayan metadata
+        
+        Args:
+            document: Haystack Document with content
+            document_id: Mayan document ID
+            document_version_id: Mayan document version ID
+            allowed_users: List of user IDs with access permission
+            
+        Returns:
+            Dict with 'status' ('indexed' or 'skipped') and 'document_count'
+        """
+        self.logger.info(
+            f"Indexing Mayan document: document_id={document_id}, "
+            f"document_version_id={document_version_id}, "
+            f"allowed_users={allowed_users}"
+        )
+        
+        # Step 0: Ensure collection exists (handles external deletion)
+        self._ensure_collection_exists()
+        
+        # Step 1: Skip if this exact version is already indexed
+        if self.is_document_version_indexed(document_id, document_version_id):
+            self.logger.info(
+                f"document_id={document_id}, document_version_id={document_version_id} "
+                f"already indexed, skipping"
+            )
+            return {"status": "skipped", "document_count": 0}
+        
+        # Step 2: Delete ALL previous versions of this document
+        deleted_count = self.delete_all_versions_of_document(document_id)
+        if deleted_count > 0:
+            self.logger.info(
+                f"Replaced {deleted_count} chunks from previous version(s) "
+                f"of document_id={document_id}"
+            )
+        
+        # Step 2b: Delete orphaned chunks from same file under old document_id
+        content_hash = document.meta.get("content_hash")
+        if content_hash:
+            orphan_count = self.delete_chunks_by_content_hash(content_hash, document_id)
+            if orphan_count > 0:
+                self.logger.info(
+                    f"Cleaned up {orphan_count} orphaned chunks from same file "
+                    f"under previous document_id(s)"
+                )
+        
+        # Step 3: Add Mayan metadata to the document
+        document.meta["document_id"] = document_id
+        document.meta["document_version_id"] = document_version_id
+        document.meta["allowed_users"] = allowed_users
+        
+        # Step 4: Run through existing pipeline (includes MetadataEnricher)
+        doc_count = self.index_documents([document], skip_duplicates=False)
+        return {"status": "indexed", "document_count": doc_count}
+    
+    def query_with_permissions(
+        self, 
+        query: str, 
+        user_id: int, 
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Query the RAG system with permission filtering.
+        
+        Only returns documents where user_id is in allowed_users.
+        
+        Args:
+            query: The search query
+            user_id: The requesting user's ID for permission filtering
+            session_id: Optional session ID for tracking
+            
+        Returns:
+            Dictionary with 'answer' and 'results' (unique document versions)
+        """
+        self.logger.info(f"Processing query with permissions: user_id={user_id}, query='{query}'")
+        
+        # Run ONLY retrieval (skip generation — we'll generate once after permission filtering)
+        try:
+            metadata = self._extract_metadata(query)
+        except Exception as e:
+            self.logger.error(f"Metadata extraction failed: {e}")
+            return {"answer": "", "results": []}
+        
+        retrieved_docs, retrieval_time = self._retrieve_documents(query, metadata)
+        
+        if not retrieved_docs:
+            self.logger.warning("No documents retrieved")
+            return {"answer": "", "results": []}
+        
+        # Step 1: Filter by permissions - only keep docs where user_id in allowed_users
+        # Documents without allowed_users are EXCLUDED (strict mode - no public fallback)
+        permitted_docs = []
+        for doc in retrieved_docs:
+            allowed_users = doc.meta.get("allowed_users", [])
+            
+            if not allowed_users:
+                # No permissions set — skip (do not treat as public)
+                self.logger.debug(
+                    f"Filtered out doc {doc.id}: no allowed_users set"
+                )
+            elif user_id in allowed_users:
+                permitted_docs.append(doc)
+            else:
+                self.logger.debug(
+                    f"Filtered out doc {doc.id}: user {user_id} not in allowed_users {allowed_users}"
+                )
+        
+        self.logger.info(
+            f"Permission filtering: {len(retrieved_docs)} → {len(permitted_docs)} documents"
+        )
+        
+        # Step 2: Deduplicate by (document_id, document_version_id)
+        seen_versions = set()
+        unique_results = []
+        unique_docs_for_generation = []
+        
+        for doc in permitted_docs:
+            doc_id = doc.meta.get("document_id")
+            version_id = doc.meta.get("document_version_id")
+            
+            # Handle legacy documents without Mayan metadata
+            if doc_id is None or version_id is None:
+                # Use file_path as fallback for legacy documents
+                fallback_key = doc.meta.get("file_path", doc.id)
+                if fallback_key not in seen_versions:
+                    seen_versions.add(fallback_key)
+                    unique_docs_for_generation.append(doc)
+                continue
+            
+            version_key = (doc_id, version_id)
+            if version_key not in seen_versions:
+                seen_versions.add(version_key)
+                unique_results.append({
+                    "document_id": doc_id,
+                    "document_version_id": version_id,
+                })
+                unique_docs_for_generation.append(doc)
+        
+        self.logger.info(f"After deduplication: {len(unique_results)} unique document versions")
+        
+        # Step 3: Regenerate answer using ALL permitted chunks (not deduplicated)
+        # unique_docs_for_generation is deduplicated by version — but the LLM needs
+        # all chunks to have enough context for a good answer.
+        if permitted_docs:
+            replies, _ = self._generate_answer(query, permitted_docs)
+            answer = ""
+            if replies:
+                reply = replies[0]
+                if hasattr(reply, 'text'):
+                    answer = reply.text
+                elif hasattr(reply, 'content'):
+                    answer = reply.content
+                else:
+                    answer = str(reply)
+        else:
+            answer = ""
+            self.logger.warning("No permitted documents found for query")
+        
+        return {
+            "answer": answer,
+            "results": unique_results,
         }

@@ -1,0 +1,883 @@
+"""
+FastAPI server for Mayan EDMS integration
+
+Exposes REST endpoints for:
+- Document indexing via file upload (POST /index)
+- AI-assisted search with permissions (POST /query)
+- Webhook-triggered document indexing
+- Health checks and status
+
+Run with: uvicorn api.server:app --reload
+Or: poetry run api-server
+"""
+
+import os
+import io
+import json
+import logging
+import tempfile
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+from contextlib import asynccontextmanager
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from haystack import Document
+from haystack.components.converters import PyPDFToDocument
+
+# Import app components
+from pathlib import Path
+
+from ..app import HybridRAGApplication
+from .. import config
+from .mayan_client import MayanClient, MayanDocument
+
+logger = logging.getLogger("HybridRAG.API")
+
+# Supported file extensions for /index endpoint
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
+
+# =====================
+# Global state
+# =====================
+rag_app: Optional[HybridRAGApplication] = None
+mayan_client: Optional[MayanClient] = None
+executor = ThreadPoolExecutor(max_workers=3)
+
+# =====================
+# Pydantic models
+# =====================
+
+class MayanWebhookPayload(BaseModel):
+    """
+    Payload from Mayan EDMS workflow HTTP action
+    
+    Mayan sends document_id when workflow triggers
+    """
+    document_id: int = Field(..., description="Mayan document ID")
+    action: str = Field(default="index", description="Action: index or delete")
+    # Optional fields Mayan might send
+    document_type_id: Optional[int] = None
+    label: Optional[str] = None
+    user_id: Optional[int] = None
+
+
+class MayanIndexResponse(BaseModel):
+    """Response for POST /index endpoint (Mayan EDMS spec)"""
+    status: str = Field(..., description="'indexed' on success")
+    document_id: int
+    document_version_id: int
+
+
+class MayanQueryRequest(BaseModel):
+    """Request body for POST /query endpoint (Mayan EDMS spec)"""
+    user_id: int = Field(..., description="Requesting user's ID for permission filtering")
+    query: str = Field(..., description="Search query text")
+
+
+class MayanQueryResultItem(BaseModel):
+    """Single result item in query response"""
+    document_id: int
+    document_version_id: int
+
+
+class MayanQueryResponse(BaseModel):
+    """Response for POST /query endpoint (Mayan EDMS spec)"""
+    answer: str = Field(..., description="AI-generated answer")
+    results: List[MayanQueryResultItem] = Field(
+        default_factory=list, 
+        description="List of matching document versions"
+    )
+
+
+class IndexRequest(BaseModel):
+    """Manual index request (legacy)"""
+    document_ids: List[int] = Field(..., description="List of Mayan document IDs to index")
+    force_reindex: bool = Field(default=False, description="Re-index even if already indexed")
+
+
+class IndexResponse(BaseModel):
+    """Response for indexing operations"""
+    success: bool
+    message: str
+    document_id: Optional[int] = None
+    indexed_count: Optional[int] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str
+    timestamp: str
+    rag_initialized: bool
+    mayan_configured: bool
+    qdrant_connected: bool
+    document_count: int
+
+
+class StatusResponse(BaseModel):
+    """Detailed status response"""
+    qdrant_url: str
+    collection: str
+    document_count: int
+    mayan_url: Optional[str]
+    features: Dict[str, bool]
+
+
+# =====================
+# Lifespan management
+# =====================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup resources"""
+    global rag_app, mayan_client
+    
+    logger.info("=" * 60)
+    logger.info("Starting Hybrid RAG API Server")
+    logger.info("=" * 60)
+    
+    # Initialize RAG application
+    try:
+        rag_app = HybridRAGApplication()
+        logger.info("RAG application initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize RAG application: {e}")
+        raise
+    
+    # Initialize Mayan client (optional - may not be configured)
+    try:
+        mayan_url = os.getenv("MAYAN_URL")
+        if mayan_url:
+            mayan_client = MayanClient()
+            logger.info(f"Mayan client initialized: {mayan_url}")
+        else:
+            logger.warning("MAYAN_URL not configured - webhook indexing disabled")
+    except Exception as e:
+        logger.warning(f"Mayan client not initialized: {e}")
+        mayan_client = None
+    
+    yield
+    
+    # Cleanup
+    logger.info("Shutting down API server")
+    if mayan_client:
+        mayan_client.close()
+    executor.shutdown(wait=True)
+
+
+# =====================
+# FastAPI app
+# =====================
+
+app = FastAPI(
+    title="Hybrid RAG API",
+    description="REST API for Mayan EDMS integration with Haystack RAG",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# =====================
+# Dependencies
+# =====================
+
+def get_rag_app() -> HybridRAGApplication:
+    """Dependency to get RAG application"""
+    if rag_app is None:
+        raise HTTPException(status_code=503, detail="RAG application not initialized")
+    return rag_app
+
+
+def get_mayan_client() -> MayanClient:
+    """Dependency to get Mayan client"""
+    if mayan_client is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Mayan client not configured. Set MAYAN_URL and MAYAN_API_TOKEN."
+        )
+    return mayan_client
+
+
+def verify_webhook_secret(x_webhook_secret: Optional[str] = Header(None)) -> bool:
+    """Verify webhook secret if configured"""
+    expected_secret = os.getenv("WEBHOOK_SECRET")
+    if expected_secret and x_webhook_secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+    return True
+
+
+# =====================
+# Helper functions
+# =====================
+
+def _extract_content_from_bytes(file_content: bytes, filename: str, document_id: int) -> str:
+    """
+    Extract text content from raw file bytes using Haystack converters.
+    Supports PDF, DOCX, and TXT.
+    """
+    suffix = Path(filename).suffix.lower()
+    
+    if suffix == ".pdf":
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(file_content)
+                tmp_path = Path(tmp.name)
+            
+            converter = PyPDFToDocument()
+            result = converter.run(sources=[tmp_path])
+            documents = result.get("documents", [])
+            tmp_path.unlink(missing_ok=True)
+            
+            if documents:
+                combined = "\n\n".join(doc.content for doc in documents if doc.content)
+                logger.info(f"PDF extracted via pypdf: {len(combined)} chars (doc {document_id})")
+                return combined
+        except Exception as e:
+            logger.warning(f"pypdf extraction failed for doc {document_id}: {e}")
+            if 'tmp_path' in locals():
+                tmp_path.unlink(missing_ok=True)
+    
+    elif suffix == ".docx":
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(file_content))
+            content = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+            logger.info(f"DOCX extracted: {len(content)} chars (doc {document_id})")
+            return content
+        except Exception as e:
+            logger.warning(f"DOCX extraction failed for doc {document_id}: {e}")
+    
+    elif suffix == ".txt":
+        try:
+            content = file_content.decode("utf-8")
+        except UnicodeDecodeError:
+            content = file_content.decode("latin-1")
+        logger.info(f"TXT extracted: {len(content)} chars (doc {document_id})")
+        return content
+    
+    return ""
+
+
+def mayan_document_to_haystack(mayan_doc: MayanDocument) -> Document:
+    """
+    Convert Mayan document to Haystack Document for indexing.
+    
+    - For PDFs/DOCX/TXT: uses file_content processed by Haystack converters
+    - For images: uses Mayan OCR content
+    """
+    content = ""
+    
+    # If we have raw file bytes (PDF/DOCX/TXT), process with Haystack
+    if mayan_doc.file_content and not mayan_doc.is_image:
+        content = _extract_content_from_bytes(
+            mayan_doc.file_content, mayan_doc.filename or mayan_doc.label, mayan_doc.id
+        )
+    
+    # Fallback to OCR content (images, or if file processing failed)
+    if not content:
+        content = mayan_doc.ocr_content or ""
+    
+    if not content:
+        logger.warning(f"Document {mayan_doc.id} has no content")
+        content = f"[Document: {mayan_doc.label}]\n{mayan_doc.description}"
+    
+    # Build metadata
+    meta = {
+        "source": f"mayan:{mayan_doc.id}",
+        "file_path": f"mayan://documents/{mayan_doc.id}",
+        "mayan_id": mayan_doc.id,
+        "label": mayan_doc.label,
+        "mayan_document_type": mayan_doc.document_type,
+        "language": mayan_doc.language,
+        "datetime_created": mayan_doc.datetime_created,
+    }
+    
+    # Add custom metadata
+    if mayan_doc.metadata:
+        for key, value in mayan_doc.metadata.items():
+            # Prefix custom metadata to avoid conflicts
+            meta[f"custom_{key}"] = value
+    
+    # Add tags as list
+    if "tags" in mayan_doc.metadata:
+        meta["tags"] = mayan_doc.metadata["tags"]
+    
+    return Document(content=content, meta=meta)
+
+
+def index_mayan_document(document_id: int) -> Dict[str, Any]:
+    """
+    Fetch and index a document from Mayan (runs in thread pool)
+    """
+    if not mayan_client:
+        raise ValueError("Mayan client not configured")
+    if not rag_app:
+        raise ValueError("RAG app not initialized")
+    
+    # Fetch from Mayan
+    mayan_doc = mayan_client.fetch_document_for_indexing(document_id)
+    
+    # Convert to Haystack document
+    haystack_doc = mayan_document_to_haystack(mayan_doc)
+    
+    # Index
+    final_count = rag_app.index_documents([haystack_doc], skip_duplicates=True)
+    
+    return {
+        "document_id": document_id,
+        "label": mayan_doc.label,
+        "content_length": len(mayan_doc.ocr_content or ""),
+        "total_documents": final_count,
+    }
+
+
+def file_to_haystack_document(
+    file_content: bytes,
+    filename: str,
+    document_id: int,
+    document_version_id: int,
+) -> Document:
+    """
+    Convert uploaded file bytes to a Haystack Document.
+    
+    Supports: PDF, DOCX, TXT, and image files.
+    For images, we assume OCR has already been performed by Mayan.
+    
+    Args:
+        file_content: Raw file bytes
+        filename: Original filename (used for extension detection)
+        document_id: Mayan document ID
+        document_version_id: Mayan document version ID
+        
+    Returns:
+        Haystack Document with content extracted from file
+    """
+    suffix = Path(filename).suffix.lower()
+    
+    if suffix == ".pdf":
+        # Handle PDF using PyPDFToDocument
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_content)
+            tmp_path = Path(tmp.name)
+        
+        try:
+            converter = PyPDFToDocument()
+            result = converter.run(sources=[tmp_path])
+            documents = result.get("documents", [])
+            
+            if documents:
+                # Combine all pages into one document
+                combined_content = "\n\n".join(doc.content for doc in documents if doc.content)
+                return Document(
+                    content=combined_content,
+                    meta={
+                        "file_path": filename,
+                        "source": f"mayan:{document_id}",
+                    }
+                )
+            else:
+                raise ValueError(f"Could not extract content from PDF: {filename}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    
+    elif suffix == ".docx":
+        # Handle DOCX - use python-docx if available
+        try:
+            import docx
+            with io.BytesIO(file_content) as docx_stream:
+                doc = docx.Document(docx_stream)
+                content = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+                return Document(
+                    content=content,
+                    meta={
+                        "file_path": filename,
+                        "source": f"mayan:{document_id}",
+                    }
+                )
+        except ImportError:
+            raise HTTPException(
+                status_code=422,
+                detail="DOCX support requires python-docx. Install with: pip install python-docx"
+            )
+    
+    elif suffix == ".txt":
+        # Handle plain text
+        try:
+            content = file_content.decode("utf-8")
+        except UnicodeDecodeError:
+            content = file_content.decode("latin-1")
+        
+        return Document(
+            content=content,
+            meta={
+                "file_path": filename,
+                "source": f"mayan:{document_id}",
+            }
+        )
+    
+    elif suffix in {".png", ".jpg", ".jpeg", ".tiff", ".bmp"}:
+        # For images, Mayan should have already done OCR
+        # The file upload should include the OCR'd text, not the raw image
+        # If we receive a raw image, we can't process it without an OCR engine
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image files ({suffix}) require OCR. Please send pre-OCR'd text content "
+                   f"or configure OCR in Mayan EDMS before pushing to RAG."
+        )
+    
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported file type: {suffix}. Supported: {SUPPORTED_EXTENSIONS}"
+        )
+
+
+# =====================
+# Endpoints
+# =====================
+
+@app.get("/", response_model=Dict[str, str])
+async def root():
+    """Root endpoint"""
+    return {
+        "service": "Hybrid RAG API",
+        "version": "1.0.0",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check(app: HybridRAGApplication = Depends(get_rag_app)):
+    """Health check endpoint"""
+    try:
+        doc_count = app.get_document_count()
+        qdrant_ok = True
+    except Exception:
+        doc_count = 0
+        qdrant_ok = False
+    
+    return HealthResponse(
+        status="healthy" if qdrant_ok else "degraded",
+        timestamp=datetime.now().isoformat(),
+        rag_initialized=rag_app is not None,
+        mayan_configured=mayan_client is not None,
+        qdrant_connected=qdrant_ok,
+        document_count=doc_count,
+    )
+
+
+@app.get("/status", response_model=StatusResponse)
+async def get_status(app: HybridRAGApplication = Depends(get_rag_app)):
+    """Get detailed system status"""
+    return StatusResponse(
+        qdrant_url=app.qdrant_url,
+        collection=app.collection_name,
+        document_count=app.get_document_count(),
+        mayan_url=os.getenv("MAYAN_URL"),
+        features={
+            "metadata_extraction": config.ENABLE_METADATA_EXTRACTION,
+            "summarization": config.ENABLE_SUMMARIZATION,
+            "reranking": config.USE_RERANKER,
+        },
+    )
+
+
+@app.post("/webhook/mayan", response_model=IndexResponse)
+async def mayan_webhook(
+    payload: MayanWebhookPayload,
+    background_tasks: BackgroundTasks,
+    app: HybridRAGApplication = Depends(get_rag_app),
+    mayan: MayanClient = Depends(get_mayan_client),
+    _: bool = Depends(verify_webhook_secret),
+):
+    """
+    Webhook endpoint for Mayan EDMS
+    
+    Configure this URL in Mayan's workflow HTTP action:
+    POST http://your-server:8000/webhook/mayan
+    
+    Payload: {"document_id": 123}
+    """
+    logger.info(f"Received Mayan webhook: document_id={payload.document_id}, action={payload.action}")
+    
+    if payload.action == "delete":
+        # TODO: Implement document deletion from Qdrant
+        return IndexResponse(
+            success=True,
+            message="Delete action received (not yet implemented)",
+            document_id=payload.document_id,
+        )
+    
+    # Index document in background
+    loop = asyncio.get_event_loop()
+    
+    try:
+        result = await loop.run_in_executor(
+            executor, 
+            index_mayan_document, 
+            payload.document_id
+        )
+        
+        return IndexResponse(
+            success=True,
+            message="Document indexed successfully",
+            document_id=payload.document_id,
+            details=result,
+        )
+    except Exception as e:
+        logger.error(f"Failed to index document {payload.document_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to index document: {str(e)}"
+        )
+
+
+# =====================
+# MAYAN EDMS INTEGRATION ENDPOINTS
+# =====================
+
+@app.post("/index", response_model=MayanIndexResponse)
+async def mayan_index_document(
+    document_id: int = Form(..., description="Mayan document ID"),
+    document_version_id: int = Form(..., description="Mayan document version ID"),
+    allowed_users: str = Form(..., description="JSON array of user IDs with access"),
+    file: UploadFile = File(..., description="Document file to index"),
+    app: HybridRAGApplication = Depends(get_rag_app),
+):
+    """
+    Index a document from Mayan EDMS via file upload.
+    
+    This endpoint accepts multipart/form-data with:
+    - document_id: Mayan document ID
+    - document_version_id: Mayan document version ID  
+    - allowed_users: JSON array of user IDs (e.g., "[1, 5, 8]")
+    - file: The document file (PDF, DOCX, TXT)
+    
+    Behavior:
+    - Parses and validates all fields
+    - If document_version_id exists, deletes existing vectors (idempotent overwrite)
+    - Processes file through indexing pipeline (MetadataEnricher preserves existing logic)
+    - Adds Mayan metadata (document_id, document_version_id, allowed_users)
+    - Returns success response for Mayan EDMS integration
+    """
+    logger.info(
+        f"POST /index: document_id={document_id}, "
+        f"document_version_id={document_version_id}, file={file.filename}"
+    )
+    
+    # Parse allowed_users from JSON string
+    try:
+        allowed_users_list = json.loads(allowed_users)
+        if not isinstance(allowed_users_list, list):
+            raise ValueError("allowed_users must be a JSON array")
+        # Ensure all elements are integers
+        allowed_users_list = [int(uid) for uid in allowed_users_list]
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        logger.error(f"Invalid allowed_users format: {allowed_users}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid allowed_users format. Expected JSON array of integers. Error: {str(e)}"
+        )
+    
+    # Validate file extension
+    if not file.filename:
+        raise HTTPException(status_code=422, detail="File must have a filename")
+    
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported file type: {suffix}. Supported: {list(SUPPORTED_EXTENSIONS)}"
+        )
+    
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        if not file_content:
+            raise HTTPException(status_code=422, detail="Empty file received")
+        
+        loop = asyncio.get_event_loop()
+        
+        # Convert file to Haystack document (runs in thread pool for I/O)
+        def process_and_index():
+            # Convert uploaded file to Haystack Document
+            haystack_doc = file_to_haystack_document(
+                file_content=file_content,
+                filename=file.filename,
+                document_id=document_id,
+                document_version_id=document_version_id,
+            )
+            
+            # Index using the Mayan-specific method (handles idempotency)
+            app.index_mayan_document(
+                document=haystack_doc,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                allowed_users=allowed_users_list,
+                overwrite=True,  # Idempotent: delete existing before insert
+            )
+            
+            return True
+        
+        await loop.run_in_executor(executor, process_and_index)
+        
+        return MayanIndexResponse(
+            status="indexed",
+            document_id=document_id,
+            document_version_id=document_version_id,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to index document: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to index document: {str(e)}"
+        )
+
+
+@app.post("/query", response_model=MayanQueryResponse)
+async def mayan_query(
+    request: MayanQueryRequest,
+    app: HybridRAGApplication = Depends(get_rag_app),
+):
+    """
+    AI-assisted search endpoint for Mayan EDMS.
+    
+    This endpoint:
+    1. Accepts JSON body with user_id and query
+    2. Performs semantic search via Haystack/Qdrant
+    3. Filters results by permission (user_id in allowed_users)
+    4. Deduplicates by (document_id, document_version_id)
+    5. Generates answer using only permitted documents
+    6. Returns answer and list of matching document versions
+    
+    Security: Only documents where user_id is in allowed_users are returned.
+    Mayan EDMS will re-filter, but RAG enforces permissions to prevent data leaks.
+    """
+    logger.info(f"POST /query: user_id={request.user_id}, query='{request.query}'")
+    
+    try:
+        loop = asyncio.get_event_loop()
+        
+        # Run query with permission filtering in thread pool
+        result = await loop.run_in_executor(
+            executor,
+            lambda: app.query_with_permissions(
+                query=request.query,
+                user_id=request.user_id,
+            )
+        )
+        
+        return MayanQueryResponse(
+            answer=result.get("answer", ""),
+            results=[
+                MayanQueryResultItem(
+                    document_id=item["document_id"],
+                    document_version_id=item["document_version_id"],
+                )
+                for item in result.get("results", [])
+            ],
+        )
+        
+    except Exception as e:
+        logger.error(f"Query failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+# =====================
+# LEGACY ENDPOINTS (backward compatibility)
+# =====================
+
+@app.post("/index/bulk", response_model=IndexResponse)
+async def bulk_index_documents(
+    request: IndexRequest,
+    app: HybridRAGApplication = Depends(get_rag_app),
+    mayan: MayanClient = Depends(get_mayan_client),
+):
+    """
+    Manually index documents from Mayan
+    
+    Use this to bulk-index existing Mayan documents
+    """
+    logger.info(f"Manual index request for {len(request.document_ids)} documents")
+    
+    loop = asyncio.get_event_loop()
+    results = []
+    errors = []
+    
+    for doc_id in request.document_ids:
+        try:
+            result = await loop.run_in_executor(
+                executor,
+                index_mayan_document,
+                doc_id
+            )
+            results.append(result)
+        except Exception as e:
+            logger.error(f"Failed to index document {doc_id}: {e}")
+            errors.append({"document_id": doc_id, "error": str(e)})
+    
+    return IndexResponse(
+        success=len(errors) == 0,
+        message=f"Indexed {len(results)} documents, {len(errors)} errors",
+        indexed_count=len(results),
+        details={
+            "successful": results,
+            "errors": errors if errors else None,
+        },
+    )
+
+
+@app.post("/index/sync", response_model=IndexResponse)
+async def sync_all_documents(
+    document_type_id: Optional[int] = Query(None, description="Filter by Mayan document type"),
+    limit: int = Query(100, description="Maximum documents to sync"),
+    app: HybridRAGApplication = Depends(get_rag_app),
+    mayan: MayanClient = Depends(get_mayan_client),
+):
+    """
+    Sync all documents from Mayan (or by document type)
+    
+    Fetches document list from Mayan and indexes any not already in Qdrant
+    """
+    logger.info(f"Sync request: document_type_id={document_type_id}, limit={limit}")
+    
+    loop = asyncio.get_event_loop()
+    
+    # Get list of documents from Mayan
+    doc_list = mayan.list_documents(page_size=limit, document_type_id=document_type_id)
+    mayan_docs = doc_list.get("results", [])
+    
+    if not mayan_docs:
+        return IndexResponse(
+            success=True,
+            message="No documents found in Mayan",
+            indexed_count=0,
+        )
+    
+    # Get existing sources from Qdrant
+    existing_sources = app.get_indexed_sources()
+    
+    # Filter to new documents only
+    new_doc_ids = []
+    for doc in mayan_docs:
+        source = f"mayan:{doc['id']}"
+        if source not in existing_sources:
+            new_doc_ids.append(doc["id"])
+    
+    if not new_doc_ids:
+        return IndexResponse(
+            success=True,
+            message="All documents already indexed",
+            indexed_count=0,
+        )
+    
+    logger.info(f"Found {len(new_doc_ids)} new documents to index")
+    
+    # Index new documents
+    results = []
+    errors = []
+    
+    for doc_id in new_doc_ids:
+        try:
+            result = await loop.run_in_executor(
+                executor,
+                index_mayan_document,
+                doc_id
+            )
+            results.append(result)
+        except Exception as e:
+            logger.error(f"Failed to index document {doc_id}: {e}")
+            errors.append({"document_id": doc_id, "error": str(e)})
+    
+    return IndexResponse(
+        success=len(errors) == 0,
+        message=f"Synced {len(results)} new documents, {len(errors)} errors",
+        indexed_count=len(results),
+        details={
+            "total_in_mayan": len(mayan_docs),
+            "already_indexed": len(mayan_docs) - len(new_doc_ids),
+            "newly_indexed": len(results),
+            "errors": errors if errors else None,
+        },
+    )
+
+
+@app.post("/query/legacy")
+async def query_documents_legacy(
+    query: str = Query(..., description="Search query"),
+    app: HybridRAGApplication = Depends(get_rag_app),
+):
+    """
+    Legacy query endpoint (for backward compatibility).
+    
+    Use POST /query with JSON body for Mayan EDMS integration.
+    """
+    try:
+        result = app.query(query)
+        # Extract answer from generator replies
+        answer = ""
+        replies = result.get("generator", {}).get("replies", [])
+        if replies:
+            reply = replies[0]
+            if hasattr(reply, 'text'):
+                answer = reply.text
+            elif hasattr(reply, 'content'):
+                answer = reply.content
+            else:
+                answer = str(reply)
+        
+        return {
+            "success": True,
+            "query": query,
+            "answer": answer,
+            "sources": [
+                {
+                    "content": doc.content[:500] + "..." if len(doc.content) > 500 else doc.content,
+                    "score": doc.score,
+                    "source": doc.meta.get("source", doc.meta.get("file_path", "unknown")),
+                }
+                for doc in result.get("retriever", {}).get("documents", [])[:5]
+            ],
+            "metadata": result.get("metadata", {}),
+        }
+    except Exception as e:
+        logger.error(f"Query failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+# =====================
+# Server entry point
+# =====================
+
+def start_server(host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
+    """Start the FastAPI server"""
+    import uvicorn
+    uvicorn.run(
+        "src.api.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    start_server(reload=True)

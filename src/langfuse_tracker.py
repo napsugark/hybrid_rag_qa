@@ -11,16 +11,19 @@ logger = logging.getLogger("HybridRAG")
 
 def setup_langfuse():
     """
-    Initialize and return Langfuse client using get_client() pattern.
+    Initialize and return Langfuse client.
+    In Langfuse v3, Langfuse() constructor must be called to set up the
+    OpenTelemetry tracer that @observe depends on. get_client() alone
+    does NOT initialize the tracer.
     Returns None if Langfuse is disabled or unavailable.
     """
     if config.LANGFUSE_ENABLED:
         try:
-            from langfuse import get_client
+            from langfuse import Langfuse
             
-            # get_client() automatically reads from environment variables
-            langfuse = get_client()
-            logger.info("Langfuse tracking enabled")
+            # Langfuse() reads env vars and initializes the OTel tracer
+            langfuse = Langfuse()
+            logger.info("Langfuse tracking enabled (OTel tracer initialized)")
             logger.info(f"  - Host: {config.LANGFUSE_HOST}")
             return langfuse
             

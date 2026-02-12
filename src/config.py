@@ -24,7 +24,7 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 # Qdrant Cloud is required - set these in your .env file
 QDRANT_URL = os.getenv("QDRANT_ENDPOINT")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_COLLECTION = "hybrid_rag_documents_multilingual_large_dense_gpt4omini_v_11"
+QDRANT_COLLECTION = "rag_hybrid_arcticl2_v11"
 # QDRANT_COLLECTION = "hybrid_rag_documents_multilingual_large_dense_v7"
 
 # QDRANT_EMBEDDING_DIM = 1024  # Snowflake arctic-embed-l dimension
@@ -143,7 +143,7 @@ SPARSE_WEIGHT = 0.6  # Weight for keyword search (higher for dates/invoices/stru
 
 # Reranking
 USE_RERANKER = True
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 RERANKER_TOP_K = 10  # Final number of documents after reranking
 
 # ============================================================================
@@ -230,6 +230,12 @@ LANGFUSE_ENABLED = bool(os.getenv("LANGFUSE_PUBLIC_KEY"))
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
+# ============================================================================
+# MAYAN EDMS
+# ============================================================================
+MAYAN_URL = os.getenv("MAYAN_URL", "")
+MAYAN_API_TOKEN = os.getenv("MAYAN_API_TOKEN", "")
 
 # ============================================================================
 # PERFORMANCE

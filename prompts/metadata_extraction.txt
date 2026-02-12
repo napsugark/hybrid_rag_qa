@@ -9,6 +9,7 @@ CRITICAL INSTRUCTIONS:
 
 Document text:
 {{content}}
+{{detected_type_hint}}
 
 Respond with ONLY a valid JSON object in this exact format (no markdown, no comments, no extra text):
 {

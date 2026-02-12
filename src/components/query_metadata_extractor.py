@@ -456,17 +456,17 @@ Now analyze this query and respond ONLY with valid JSON:
         if "factur" in query_lower:
             metadata["document_type"] = "factura"
             conditions.append(
-                {"field": "document_type", "operator": "==", "value": "factura"}
+                {"field": "meta.document_type", "operator": "==", "value": "factura"}
             )
         elif "chitanț" in query_lower:
             metadata["document_type"] = "chitanta"
             conditions.append(
-                {"field": "document_type", "operator": "==", "value": "chitanta"}
+                {"field": "meta.document_type", "operator": "==", "value": "chitanta"}
             )
         elif "contract" in query_lower:
             metadata["document_type"] = "contract"
             conditions.append(
-                {"field": "document_type", "operator": "==", "value": "contract"}
+                {"field": "meta.document_type", "operator": "==", "value": "contract"}
             )
 
         # Detect date patterns (DD.MM.YYYY or DD/MM/YYYY or DD-MM-YYYY)
@@ -480,16 +480,16 @@ Now analyze this query and respond ONLY with valid JSON:
             metadata["month"] = month
             metadata["year"] = year
 
-            conditions.append({"field": "day", "operator": "==", "value": day})
-            conditions.append({"field": "month", "operator": "==", "value": month})
-            conditions.append({"field": "year", "operator": "==", "value": year})
+            conditions.append({"field": "meta.day", "operator": "==", "value": day})
+            conditions.append({"field": "meta.month", "operator": "==", "value": month})
+            conditions.append({"field": "meta.year", "operator": "==", "value": year})
         else:
             # Detect year patterns only if no full date found
             year_match = re.search(r"\b(202[0-9])\b", query)
             if year_match:
                 year = int(year_match.group(1))
                 metadata["year"] = year
-                conditions.append({"field": "year", "operator": "==", "value": year})
+                conditions.append({"field": "meta.year", "operator": "==", "value": year})
 
         # Detect "anul trecut" (last year)
         if "anul trecut" in query_lower or "anul precedent" in query_lower:

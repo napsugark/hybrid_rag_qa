@@ -73,6 +73,12 @@ def create_metadata_indexes():
         
         # From BoilerplateFilter (production-grade component)
         "meta.boilerplate_score": PayloadSchemaType.INTEGER,  # Boilerplate detection score
+        
+        # Mayan EDMS integration fields (for permission filtering and deduplication)
+        "meta.document_id": PayloadSchemaType.INTEGER,           # Mayan document ID
+        "meta.document_version_id": PayloadSchemaType.INTEGER,   # Mayan document version ID
+        "meta.allowed_users": PayloadSchemaType.INTEGER,         # User IDs with access (array)
+        "meta.content_hash": PayloadSchemaType.KEYWORD,          # SHA-256 hash for content dedup
     }
     
     logger.info("Creating payload indexes for metadata fields:")
