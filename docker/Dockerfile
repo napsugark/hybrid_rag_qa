@@ -53,7 +53,8 @@ RUN mkdir -p logs data/documents_ro .cache
 EXPOSE 8000
 
 # Health check — matches the /health endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+# start-period is long to allow model downloads on first boot
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run via uvicorn (workers=1 because embedding models are loaded in-process)
