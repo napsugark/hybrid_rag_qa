@@ -1,7 +1,0 @@
-# Langfuse Docker data - do not commit
-postgres-data/
-redis-data/
-.env.langfuse
-
-# Docker logs
-*.log

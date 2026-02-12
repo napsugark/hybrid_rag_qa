@@ -292,11 +292,3 @@ class RateLimiter:
             with self:
                 return func(*args, **kwargs)
         return wrapper
-
-
-def get_stats() -> Dict[str, Any]:
-    """Get statistics from all rate limiters and circuit breakers"""
-    # This could be extended to track all instances
-    return {
-        "note": "Stats collection to be implemented with instance registry"
-    }

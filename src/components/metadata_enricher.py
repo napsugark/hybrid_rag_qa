@@ -205,26 +205,6 @@ Rules:
                 else:
                     hint = ""
                 prompt = prompt.replace("{{detected_type_hint}}", hint)
-                
-                # # Generate metadata with explicit generation kwargs
-                # result = self.generator.run(
-                #     messages=[ChatMessage.from_user(prompt)],
-                #     generation_kwargs={
-                #         "num_predict": 1200,
-                #         "temperature": 0.3,
-                #     },
-                # )
-                
-                # if not result or "replies" not in result or not result["replies"]:
-                #     logger.error(f"No response from LLM for document {idx}. Result: {result}")
-                #     enriched_docs.append(doc)
-                #     continue
-                
-                # # Parse JSON response
-                # response_text = result["replies"][0].strip()
-                
-                # # Try to extract JSON from response
-                # metadata = self._parse_json_response(response_text)
 
                 # Send prompt to LLM and handle both Ollama and AzureOpenAI correctly
                 chat_message = ChatMessage.from_user(prompt)

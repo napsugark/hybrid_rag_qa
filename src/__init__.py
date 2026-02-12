@@ -2,12 +2,13 @@
 Core application package
 
 Modules:
-- app: Main RAG application class
+- app: Main RAG application facade
 - config: Configuration settings
+- pipelines: Indexing and retrieval pipeline classes
+- integrations: External system clients (Mayan EDMS)
 - langfuse_tracker: Langfuse observability integration
 """
 
 from .app import HybridRAGApplication
-from .config import *
 
 __all__ = ['HybridRAGApplication']

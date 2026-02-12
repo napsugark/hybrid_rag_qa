@@ -266,11 +266,7 @@ class RAGEvaluator:
         if not trace_id:
             print("[WARN] No Langfuse trace_id found, skipping score logging")
             return
-        try:
-            # # Create a unique trace_id for this evaluation run
-            # # Using eval_id ensures we can group related scores
-            # eval_trace_id = f"eval_{eval_result['eval_id']}_{eval_result['timestamp'].replace(':', '-').replace('.', '-')}"
-            
+        try:            
             # Log overall score
             self.langfuse.create_score(
                 name="overall_score",

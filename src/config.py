@@ -1,288 +1,249 @@
 """
-Configuration file for Advanced Hybrid RAG Application
+Configuration for Advanced Hybrid RAG Application
+
+Uses Pydantic BaseSettings for typed, validated, env-aware configuration.
+All existing ``config.SOME_CONSTANT`` access patterns are preserved via a
+module-level ``__getattr__`` that proxies to the singleton ``settings`` instance.
 """
 
-import os
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional
 
-# Load environment variables
-load_dotenv()
-
-# ============================================================================
-# PATHS
-# ============================================================================
-BASE_DIR = Path(__file__).parent.parent  # Project root (one level up from src/)
-DATA_DIR = BASE_DIR / "data"
-DOCUMENTS_DIR = DATA_DIR / "documents_ro"
-LOGS_DIR = BASE_DIR / "logs"
-PROMPTS_DIR = BASE_DIR / "prompts"
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ============================================================================
-# QDRANT CONFIGURATION
+# Path constants (derived from file location, not from env)
 # ============================================================================
-# Qdrant Cloud is required - set these in your .env file
-QDRANT_URL = os.getenv("QDRANT_ENDPOINT")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_COLLECTION = "rag_hybrid_arcticl2_v11"
-# QDRANT_COLLECTION = "hybrid_rag_documents_multilingual_large_dense_v7"
-
-# QDRANT_EMBEDDING_DIM = 1024  # Snowflake arctic-embed-l dimension
-QDRANT_EMBEDDING_DIM = 1024  # Snowflake arctic-embed-l-v2.0 dimension
-# QDRANT_EMBEDDING_DIM = 768  # Snowflake arctic-embed-m-v2.0 dimension for the smaller/faster model
+BASE_DIR: Path = Path(__file__).parent.parent
+DATA_DIR: Path = BASE_DIR / "data"
+DOCUMENTS_DIR: Path = DATA_DIR / "documents_ro"
+LOGS_DIR: Path = BASE_DIR / "logs"
+PROMPTS_DIR: Path = BASE_DIR / "prompts"
+CACHE_DIR: Path = BASE_DIR / ".cache"
 
 # ============================================================================
-# OLLAMA CONFIGURATION
+# Prompt file paths (numbered for pipeline-order clarity)
 # ============================================================================
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11435")
-# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-OLLAMA_TIMEOUT = 600  # seconds
-OLLAMA_KEEP_ALIVE = "30m"
+BOILERPLATE_DETECTION_PROMPT_FILE: Path = PROMPTS_DIR / "01_boilerplate_detection.txt"
+METADATA_EXTRACTION_PROMPT_FILE: Path = PROMPTS_DIR / "02_metadata_extraction.txt"
+SUMMARIZATION_PROMPT_FILE: Path = PROMPTS_DIR / "03_summarization.txt"
+QUERY_EXTRACTION_PROMPT_FILE: Path = PROMPTS_DIR / "04_query_extraction.txt"
+RAG_SYSTEM_PROMPT_FILE: Path = PROMPTS_DIR / "05_rag_system.txt"
+RAG_USER_PROMPT_FILE: Path = PROMPTS_DIR / "06_rag_user.txt"
+RAG_USER_PROMPT_CONCISE_FILE: Path = PROMPTS_DIR / "07_rag_user_concise.txt"
+RAG_USER_PROMPT_STRUCTURED_FILE: Path = PROMPTS_DIR / "08_rag_user_structured.txt"
 
-# ============================================================================
-# AZURE OPENAI CONFIGURATION
-# ============================================================================
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv(
-    "AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"
-)  # Set your deployment name
-AZURE_OPENAI_API_VERSION = os.getenv(
-    "AZURE_OPENAI_API_VERSION", "2024-06-01"
-) 
-GENERATION_CONFIG = {
-    "temperature": 0.1,
-    "max_tokens": 300,
-}
-
-# ============================================================================
-# MODEL SELECTION - Switch between Ollama and Azure OpenAI
-# ============================================================================
-# Change this to switch models:
-#   - "OLLAMA" for local Llama models via Ollama
-#   - "AZURE_OPENAI" for Azure OpenAI (GPT-4o-mini, etc.)
-MODEL_TO_USE = os.getenv("MODEL_TO_USE", "AZURE_OPENAI")  # or "OLLAMA"
-
-if MODEL_TO_USE == "OLLAMA":
-    LLM_TYPE = "OLLAMA"
-    LLM_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-    LLM_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11435")
-    LLM_API_KEY = None
-    LLM_API_VERSION = None
-elif MODEL_TO_USE == "AZURE_OPENAI":
-    LLM_TYPE = "AZURE_OPENAI"
-    LLM_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
-    LLM_URL = os.getenv("AZURE_OPENAI_ENDPOINT")
-    LLM_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-    LLM_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
-else:
-    raise ValueError(f"Unknown MODEL_TO_USE: {MODEL_TO_USE}. Use 'OLLAMA' or 'AZURE_OPENAI'")
-
-
-
-
+# Active prompt variant (change to switch answer style)
+ACTIVE_RAG_USER_PROMPT: Path = RAG_USER_PROMPT_CONCISE_FILE
 
 
 # ============================================================================
-# EMBEDDING MODELS
+# Settings class
 # ============================================================================
-# Dense embedding model (semantic similarity) multilingual model
-# DENSE_EMBEDDING_MODEL = "Snowflake/snowflake-arctic-embed-l"
-DENSE_EMBEDDING_MODEL = "Snowflake/snowflake-arctic-embed-l-v2.0" # larger/better
-# DENSE_EMBEDDING_MODEL = "Snowflake/snowflake-arctic-embed-m-v2.0" - smaller/faster
+class Settings(BaseSettings):
+    """Typed, validated configuration loaded from .env + environment."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
-DENSE_EMBEDDING_PREFIX = "Represent this sentence for searching relevant passages: "
+    # ---- Qdrant ----------------------------------------------------------
+    QDRANT_URL: Optional[str] = Field(
+        default=None,
+        validation_alias="QDRANT_ENDPOINT",
+        description="Qdrant Cloud endpoint URL",
+    )
+    QDRANT_API_KEY: Optional[str] = None
+    QDRANT_COLLECTION: str = "rag_hybrid_arcticl2_v11"
+    QDRANT_EMBEDDING_DIM: int = 1024  # Snowflake arctic-embed-l-v2.0
 
-# Sparse embedding model (keyword matching)
-# English SPLADE model (not good for Romanian)
-# SPARSE_EMBEDDING_MODEL = "prithvida/Splade_PP_en_v1"
-# BM25 - language-agnostic, supports Romanian stopwords
-SPARSE_EMBEDDING_MODEL = "Qdrant/bm25"
+    # ---- Ollama ----------------------------------------------------------
+    OLLAMA_URL: str = "http://127.0.0.1:11435"
+    OLLAMA_MODEL: str = "llama3.1:8b"
+    OLLAMA_TIMEOUT: int = 600
+    OLLAMA_KEEP_ALIVE: str = "30m"
 
+    # ---- Azure OpenAI ----------------------------------------------------
+    AZURE_OPENAI_ENDPOINT: Optional[str] = None
+    AZURE_OPENAI_API_KEY: Optional[str] = None
+    AZURE_OPENAI_DEPLOYMENT: str = "gpt-4o-mini"
+    AZURE_OPENAI_API_VERSION: str = "2024-06-01"
 
-# Device for embeddings ('cpu', 'cuda', 'mps')
-EMBEDDING_DEVICE = "cpu"
+    # ---- Generation ------------------------------------------------------
+    GENERATION_CONFIG: Dict[str, Any] = {"temperature": 0.1, "max_tokens": 300}
+
+    # ---- Model selection -------------------------------------------------
+    MODEL_TO_USE: str = "AZURE_OPENAI"  # "OLLAMA" or "AZURE_OPENAI"
+
+    # Derived — resolved by validator
+    LLM_TYPE: str = ""
+    LLM_MODEL: str = ""
+    LLM_URL: Optional[str] = None
+    LLM_API_KEY: Optional[str] = None
+    LLM_API_VERSION: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _resolve_llm_settings(self) -> "Settings":
+        if self.MODEL_TO_USE == "OLLAMA":
+            self.LLM_TYPE = "OLLAMA"
+            self.LLM_MODEL = self.OLLAMA_MODEL
+            self.LLM_URL = self.OLLAMA_URL
+            self.LLM_API_KEY = None
+            self.LLM_API_VERSION = None
+        elif self.MODEL_TO_USE == "AZURE_OPENAI":
+            self.LLM_TYPE = "AZURE_OPENAI"
+            self.LLM_MODEL = self.AZURE_OPENAI_DEPLOYMENT
+            self.LLM_URL = self.AZURE_OPENAI_ENDPOINT
+            self.LLM_API_KEY = self.AZURE_OPENAI_API_KEY
+            self.LLM_API_VERSION = self.AZURE_OPENAI_API_VERSION
+        else:
+            raise ValueError(
+                f"Unknown MODEL_TO_USE: {self.MODEL_TO_USE}. "
+                "Use 'OLLAMA' or 'AZURE_OPENAI'"
+            )
+        return self
+
+    # ---- Embedding models ------------------------------------------------
+    DENSE_EMBEDDING_MODEL: str = "Snowflake/snowflake-arctic-embed-l-v2.0"
+    DENSE_EMBEDDING_PREFIX: str = (
+        "Represent this sentence for searching relevant passages: "
+    )
+    SPARSE_EMBEDDING_MODEL: str = "Qdrant/bm25"
+    EMBEDDING_DEVICE: str = "cpu"  # 'cpu', 'cuda', 'mps'
+
+    # ---- Document processing ---------------------------------------------
+    CHUNK_SPLIT_BY: str = "word"
+    CHUNK_SIZE: int = 300
+    CHUNK_OVERLAP: int = 50
+    SUPPORTED_EXTENSIONS: List[str] = [".txt", ".pdf", ".md"]
+
+    USE_DOCUMENT_TYPE_DETECTION: bool = True
+    USE_SEMANTIC_CHUNKING: bool = True
+    USE_BOILERPLATE_FILTER: bool = True
+
+    SEMANTIC_CHUNK_MIN_SIZE: int = 100
+    SEMANTIC_CHUNK_MAX_SIZE: int = 800
+    SEMANTIC_CHUNK_OVERLAP: int = 50
+
+    BOILERPLATE_MIN_SCORE: int = 3
+    SKIP_LEGAL_SECTIONS: bool = True
+    SKIP_PAYMENT_SECTIONS: bool = True
+
+    # ---- Retrieval -------------------------------------------------------
+    TOP_K: int = 5
+    USE_RERANKER: bool = True
+    RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    RERANKER_TOP_K: int = 10
+
+    # Minimum reranker score to include a document in Mayan /query results.
+    # Cross-encoder scores are roughly calibrated 0-1; 0.3 is a reasonable
+    # threshold to drop clearly irrelevant retrievals.
+    MAYAN_RESULTS_MIN_SCORE: float = 0.3
+
+    # ---- Metadata enrichment ---------------------------------------------
+    ENABLE_METADATA_EXTRACTION: bool = True
+    METADATA_EXTRACTION_STRATEGY: str = "full_document"
+    METADATA_EXTRACTION_MAX_CHARS: int = 3000
+    METADATA_FIELDS: List[str] = [
+        "company",
+        "client",
+        "year",
+        "month",
+        "day",
+        "date",
+        "document_type",
+        "invoice_number",
+        "amount",
+        "currency",
+        "entities",
+        "topics",
+        "keywords",
+        "language",
+        "triples",
+    ]
+
+    # ---- Summarization ---------------------------------------------------
+    ENABLE_SUMMARIZATION: bool = True
+    SUMMARIZE_ONLY_VALUABLE_CHUNKS: bool = True
+    SUMMARIZE_SECTION_TYPES: List[str] = [
+        "line_items", "scope", "terms", "unknown",
+    ]
+    SKIP_SUMMARY_SECTION_TYPES: List[str] = [
+        "legal", "payment", "header", "totals",
+    ]
+    SUMMARY_MAX_LENGTH: int = 150
+    SUMMARY_STYLE: str = "concise"
+
+    # ---- Logging ---------------------------------------------------------
+    LOG_LEVEL: str = "DEBUG"
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    LOG_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+
+    # ---- Langfuse --------------------------------------------------------
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = "http://localhost:3000"
+
+    @property
+    def LANGFUSE_ENABLED(self) -> bool:  # noqa: N802
+        return bool(self.LANGFUSE_PUBLIC_KEY)
+
+    # ---- Mayan EDMS ------------------------------------------------------
+    MAYAN_URL: str = ""
+    MAYAN_API_TOKEN: str = ""
+
+    # ---- Performance / caching -------------------------------------------
+    INDEXING_BATCH_SIZE: int = 10
+    QUERY_BATCH_SIZE: int = 5
+    ENABLE_EMBEDDING_CACHE: bool = True
+
+    EMBEDDING_CACHE_SIZE: int = 1000
+    RETRIEVAL_CACHE_SIZE: int = 500
+    RESPONSE_CACHE_SIZE: int = 200
+    EMBEDDING_CACHE_TTL: int = 3600
+    RETRIEVAL_CACHE_TTL: int = 1800
+    RESPONSE_CACHE_TTL: int = 3600
+
+    # ---- Resilience ------------------------------------------------------
+    QDRANT_CIRCUIT_BREAKER_THRESHOLD: int = 5
+    QDRANT_CIRCUIT_BREAKER_TIMEOUT: float = 60.0
+    OLLAMA_CIRCUIT_BREAKER_THRESHOLD: int = 3
+    OLLAMA_CIRCUIT_BREAKER_TIMEOUT: float = 30.0
+
+    OLLAMA_MAX_CONCURRENT: int = 2
+    OLLAMA_MAX_PER_MINUTE: int = 60
+    QDRANT_MAX_CONCURRENT: int = 10
+
+    MAX_RETRY_ATTEMPTS: int = 3
+    INITIAL_RETRY_DELAY: float = 1.0
+    MAX_RETRY_DELAY: float = 60.0
+
+    # ---- Display ---------------------------------------------------------
+    DISPLAY_CONFIG: Dict[str, Any] = {
+        "show_scores": True,
+        "show_metadata": True,
+        "show_summaries": True,
+        "show_sources": True,
+        "max_content_preview": 800,
+        "color_scheme": "default",
+    }
+
 
 # ============================================================================
-# DOCUMENT PROCESSING
+# Singleton instance
 # ============================================================================
-# Chunking strategy
-CHUNK_SPLIT_BY = "word"  # 'word', 'sentence', 'page'
-CHUNK_SIZE = 300  # words per chunk
-CHUNK_OVERLAP = 50  # words overlap between chunks
+settings = Settings()
 
-# File types to process
-SUPPORTED_EXTENSIONS = [".txt", ".pdf", ".md"]
-
-# Production-grade document processing
-USE_DOCUMENT_TYPE_DETECTION = True  # Detect invoice/contract/receipt types
-USE_SEMANTIC_CHUNKING = True  # Use logical sections instead of fixed-size chunks
-USE_BOILERPLATE_FILTER = True  # Remove legal/payment text before embedding
-
-# Semantic chunking settings
-SEMANTIC_CHUNK_MIN_SIZE = 100  # Minimum chunk size in characters
-SEMANTIC_CHUNK_MAX_SIZE = 800  # Maximum chunk size in characters
-SEMANTIC_CHUNK_OVERLAP = 50  # Overlap between chunks
-
-# Boilerplate filtering settings
-BOILERPLATE_MIN_SCORE = 3  # Minimum patterns to classify as boilerplate
-SKIP_LEGAL_SECTIONS = True  # Skip legal disclaimers
-SKIP_PAYMENT_SECTIONS = True  # Skip payment instructions
 
 # ============================================================================
-# RETRIEVAL CONFIGURATION
+# Backward-compatible module-level access:  config.QDRANT_URL  etc.
 # ============================================================================
-# Number of documents to retrieve
-TOP_K = 5 
-
-# Hybrid search weights (must sum to 1.0)
-DENSE_WEIGHT = 0.4  # Weight for semantic search
-SPARSE_WEIGHT = 0.6  # Weight for keyword search (higher for dates/invoices/structured data)
-
-# Reranking
-USE_RERANKER = True
-RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
-RERANKER_TOP_K = 10  # Final number of documents after reranking
-
-# ============================================================================
-# METADATA ENRICHMENT
-# ============================================================================
-ENABLE_METADATA_EXTRACTION = True
-
-# Metadata extraction strategy
-# Options: "full_document", "first_page", "first_n_chars"
-METADATA_EXTRACTION_STRATEGY = "full_document"  # Extract from entire document before chunking
-METADATA_EXTRACTION_MAX_CHARS = 3000  # Only used if strategy = "first_n_chars"
-
-# Metadata to extract
-METADATA_FIELDS = [
-    "company",  # ← FILTERABLE company name
-    "client",  # ← FILTERABLE client name
-    "year",  # ← FILTERABLE year (integer)
-    "month",  # ← FILTERABLE month (integer)
-    "day",  # ← FILTERABLE day (integer)
-    "date",  # ← FILTERABLE full date
-    "document_type",  # ← FILTERABLE doc type
-    "invoice_number",  # ← FILTERABLE invoice ID
-    "amount",  # ← FILTERABLE monetary value
-    "currency",  # ← FILTERABLE currency
-    "entities",  # General entities
-    "topics",  # Topics
-    "keywords",  # Keywords
-    "language",  # Language
-    "triples",  # Relationship triples
-]
-
-# ============================================================================
-# SUMMARIZATION
-# ============================================================================
-ENABLE_SUMMARIZATION = True
-
-# Smart summarization - only summarize valuable content
-SUMMARIZE_ONLY_VALUABLE_CHUNKS = True  # Skip boilerplate chunks
-SUMMARIZE_SECTION_TYPES = ["line_items", "scope", "terms", "unknown"]  # Which to summarize
-SKIP_SUMMARY_SECTION_TYPES = ["legal", "payment", "header", "totals"]  # Which to skip
-
-# Summary generation settings
-SUMMARY_MAX_LENGTH = 150  # words
-SUMMARY_STYLE = "concise"  # 'concise', 'detailed', 'bullet_points'
-
-# ============================================================================
-# PROMPTS (loaded from files)
-# ============================================================================
-PROMPTS_DIR = BASE_DIR / "prompts"
-METADATA_EXTRACTION_PROMPT_FILE = PROMPTS_DIR / "metadata_extraction.txt"
-QUERY_EXTRACTION_PROMPT_FILE = PROMPTS_DIR / "query_extraction.txt"
-SUMMARIZATION_PROMPT_FILE = PROMPTS_DIR / "summarization.txt"
-BOILERPLATE_DETECTION_PROMPT_FILE = PROMPTS_DIR / "boilerplate_detection.txt"
-RAG_SYSTEM_PROMPT_FILE = PROMPTS_DIR / "rag_system.txt"
-
-# RAG User Prompt Variants - switch between different styles
-RAG_USER_PROMPT_FILE = PROMPTS_DIR / "rag_user.txt"              # Default: comprehensive with structured reasoning
-RAG_USER_PROMPT_CONCISE_FILE = PROMPTS_DIR / "rag_user_concise.txt"  # Concise: short 2-3 sentence answers
-RAG_USER_PROMPT_STRUCTURED_FILE = PROMPTS_DIR / "rag_user_structured.txt"
-
-# Active prompt to use (change this to switch styles)
-ACTIVE_RAG_USER_PROMPT = RAG_USER_PROMPT_CONCISE_FILE  # Change to RAG_USER_PROMPT_CONCISE_FILE for short answers
-
-# ============================================================================
-# RAG PROMPT TEMPLATES (loaded from files)
-# ============================================================================
-# Note: RAG prompts are loaded from prompts/ directory
-# To customize prompts, edit the files directly:
-# - prompts/rag_system.txt - System instructions for the LLM
-# - prompts/rag_user.txt - User prompt template (default)
-# - prompts/rag_user_structured.txt - Alternative structured format
-
-# ============================================================================
-# LOGGING
-# ============================================================================
-LOG_LEVEL = "DEBUG"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-# ============================================================================
-# LANGFUSE CONFIGURATION
-# ============================================================================
-LANGFUSE_ENABLED = bool(os.getenv("LANGFUSE_PUBLIC_KEY"))
-LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
-LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
-
-# ============================================================================
-# MAYAN EDMS
-# ============================================================================
-MAYAN_URL = os.getenv("MAYAN_URL", "")
-MAYAN_API_TOKEN = os.getenv("MAYAN_API_TOKEN", "")
-
-# ============================================================================
-# PERFORMANCE
-# ============================================================================
-# Batch processing
-INDEXING_BATCH_SIZE = 10
-QUERY_BATCH_SIZE = 5
-
-# Caching
-ENABLE_EMBEDDING_CACHE = True
-CACHE_DIR = BASE_DIR / ".cache"
-
-# Cache configuration
-EMBEDDING_CACHE_SIZE = 1000  # Max number of cached query embeddings
-RETRIEVAL_CACHE_SIZE = 500   # Max number of cached retrieval results
-RESPONSE_CACHE_SIZE = 200    # Max number of cached LLM responses
-EMBEDDING_CACHE_TTL = 3600   # 1 hour TTL for embeddings
-RETRIEVAL_CACHE_TTL = 1800   # 30 minutes TTL for retrievals
-RESPONSE_CACHE_TTL = 3600    # 1 hour TTL for responses
-
-# ============================================================================
-# RESILIENCE & ERROR HANDLING
-# ============================================================================
-# Circuit breaker thresholds
-QDRANT_CIRCUIT_BREAKER_THRESHOLD = 5     # Open circuit after 5 failures
-QDRANT_CIRCUIT_BREAKER_TIMEOUT = 60.0    # Recovery timeout in seconds
-OLLAMA_CIRCUIT_BREAKER_THRESHOLD = 3     # Open circuit after 3 failures
-OLLAMA_CIRCUIT_BREAKER_TIMEOUT = 30.0    # Recovery timeout in seconds
-
-# Rate limiting
-OLLAMA_MAX_CONCURRENT = 2      # Max concurrent Ollama requests (GPU protection)
-OLLAMA_MAX_PER_MINUTE = 60     # Max Ollama requests per minute
-QDRANT_MAX_CONCURRENT = 10     # Max concurrent Qdrant operations
-
-# Retry configuration
-MAX_RETRY_ATTEMPTS = 3         # Max retry attempts for failed operations
-INITIAL_RETRY_DELAY = 1.0      # Initial delay before retry in seconds
-MAX_RETRY_DELAY = 60.0         # Max retry delay in seconds
-
-# ============================================================================
-# DISPLAY OPTIONS
-# ============================================================================
-DISPLAY_CONFIG = {
-    "show_scores": True,
-    "show_metadata": True,
-    "show_summaries": True,
-    "show_sources": True,
-    "max_content_preview": 800,  # characters
-    "color_scheme": "default",  # for rich terminal output
-}
+def __getattr__(name: str):
+    """Proxy attribute lookups to the settings singleton."""
+    try:
+        return getattr(settings, name)
+    except AttributeError:
+        raise AttributeError(f"module 'config' has no attribute {name}") from None

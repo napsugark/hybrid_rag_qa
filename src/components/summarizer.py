@@ -144,11 +144,10 @@ Summary:
                 )
                 
                 # Generate summary
-                # result = self.generator.run(prompt=prompt)
                 result = self.generator.run(messages=[ChatMessage.from_user(prompt)])
                 if result and "replies" in result and result["replies"]:
-                    # summary = result["replies"][0].strip()
-                    chat_msg = result["replies"][0]          # ChatMessage object
+                    chat_msg = result["replies"][0]         
+                    # ChatMessage object
                     summary = chat_msg.text.strip()  
                     # Clean up summary
                     summary = self._clean_summary(summary)

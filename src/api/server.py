@@ -35,7 +35,7 @@ from haystack.components.converters import PyPDFToDocument
 from pathlib import Path
 
 from ..app import HybridRAGApplication
-from ..api.mayan_client import MayanClient
+from ..integrations.mayan_client import MayanClient
 from .. import config
 
 logger = logging.getLogger("HybridRAG.API")

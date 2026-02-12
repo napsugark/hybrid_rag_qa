@@ -5,10 +5,8 @@ Example: "facturi Electrica din anul trecut" → filters: {company: "Electrica",
 
 import json
 import re
-import sys
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime
-from pathlib import Path
 
 from haystack import component, Pipeline
 from haystack.components.builders import PromptBuilder
@@ -345,12 +343,25 @@ Now analyze this query and respond ONLY with valid JSON:
             company_query = metadata["company"].lower()
             # Check if it's a known abbreviation
             if company_query in COMPANY_VARIATIONS:
-                # Use "in" operator with list of possible full names
-                conditions.append({
-                    "field": "meta.company",
-                    "operator": "in",
-                    "value": COMPANY_VARIATIONS[company_query]
-                })
+                # Use nested OR with "==" instead of "in" operator because
+                # Haystack's "in" maps to MatchText (requires text index),
+                # but we have a keyword index. "==" uses MatchValue which
+                # works correctly with keyword indexes.
+                variations = COMPANY_VARIATIONS[company_query]
+                if len(variations) == 1:
+                    conditions.append({
+                        "field": "meta.company",
+                        "operator": "==",
+                        "value": variations[0]
+                    })
+                else:
+                    conditions.append({
+                        "operator": "OR",
+                        "conditions": [
+                            {"field": "meta.company", "operator": "==", "value": v}
+                            for v in variations
+                        ]
+                    })
             else:
                 # Try exact match (case-sensitive)
                 conditions.append({
@@ -496,8 +507,8 @@ Now analyze this query and respond ONLY with valid JSON:
             year = self.current_year - 1
             metadata["year"] = year
             # Replace year filter if already exists
-            conditions = [c for c in conditions if c.get("field") != "year"]
-            conditions.append({"field": "year", "operator": "==", "value": year})
+            conditions = [c for c in conditions if c.get("field") != "meta.year"]
+            conditions.append({"field": "meta.year", "operator": "==", "value": year})
 
         # Detect common companies (case-insensitive)
         companies = [
@@ -512,9 +523,10 @@ Now analyze this query and respond ONLY with valid JSON:
         ]
         for company in companies:
             if company in query_lower:
-                metadata["company"] = company.title()
+                company_title = company.title()
+                metadata["company"] = company_title
                 conditions.append(
-                    {"field": "company", "operator": "==", "value": company}
+                    {"field": "meta.company", "operator": "==", "value": company_title}
                 )
                 break
 
