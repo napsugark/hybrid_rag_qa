@@ -1,7 +1,7 @@
 Summarize the following text concisely, focusing on the main business information.
 
-Style: {{style}}
-Maximum length: {{max_length}} words
+Style: {style_instruction}
+Maximum length: {max_length} words
 
 RULES:
 - Focus on: services provided, amounts, periods, deliverables
@@ -10,6 +10,6 @@ RULES:
 - Be factual and concise
 
 Text:
-{{content}}
+{content}
 
 Summary:

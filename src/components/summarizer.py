@@ -63,17 +63,9 @@ class DocumentSummarizer:
             style_instructions["concise"]
         )
 
-        # Prompt template for summarization
-        self.prompt_template = """
-You are a document summarizer. Read the following text and write a {max_length}-word summary.
-{style_instruction}
-Preserve important information such as names, dates, and amounts.
-
-Text:
-{content}
-
-Summary:
-"""
+        # Load prompt template from external file, fall back to inline default
+        self.prompt_template = self._load_prompt_template()
+        logger.info(f"Summarization prompt loaded ({len(self.prompt_template)} chars)")
 
         # Initialize the correct generator based on config.LLM_TYPE
         if self.llm_type == "OLLAMA":
@@ -183,6 +175,22 @@ Summary:
         logger.info(f"Generated summaries for {len(summarized_docs)} documents")
         return {"documents": summarized_docs}
     
+    def _load_prompt_template(self) -> str:
+        """Load the summarization prompt from the external file, with inline fallback."""
+        prompt_file = getattr(config, "SUMMARIZATION_PROMPT_FILE", None)
+        if prompt_file and prompt_file.exists():
+            logger.info(f"Loading summarization prompt from {prompt_file}")
+            return prompt_file.read_text(encoding="utf-8")
+
+        logger.warning("External summarization prompt not found — using inline fallback")
+        return (
+            "You are a document summarizer. Read the following text and write a "
+            "{max_length}-word summary.\n"
+            "{style_instruction}\n"
+            "Preserve important information such as names, dates, and amounts.\n\n"
+            "Text:\n{content}\n\nSummary:\n"
+        )
+
     def _clean_summary(self, summary: str) -> str:
         """
         Clean and format summary text
