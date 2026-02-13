@@ -72,34 +72,6 @@ services:
       - mayan
     restart: unless-stopped
 
-  # --------------------------------------------------------
-  # Ollama local LLM (optional)
-  # Only needed when MODEL_TO_USE=OLLAMA
-  # --------------------------------------------------------
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-      - ../docker/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
-    entrypoint: ["/bin/bash", "/ollama-entrypoint.sh"]
-    environment:
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
-    # ---- GPU passthrough (uncomment for NVIDIA GPU) ----
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    networks:
-      - mayan
-    restart: unless-stopped
-
-
   # ========================================================
   # LANGFUSE — Observability & Tracing
   # ========================================================
@@ -147,7 +119,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
       LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
       LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9190
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
       LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
@@ -277,8 +249,8 @@ volumes:
     driver: local
   model-cache:
     driver: local
-  ollama-data:
-    driver: local
+  # ollama-data:          # not needed — using Mayan's ollama container
+  #   driver: local
   rag-logs:
     driver: local
   langfuse-pg-data:
