@@ -228,6 +228,33 @@ class RetrievalPipeline:
             logger.warning(f"  [WARN] Generation pipeline warm_up failed: {e}")
 
     # ------------------------------------------------------------------
+    # Helper — recursive numeric coercion for filter trees
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_numeric_filter_values(
+        conditions: list, numeric_fields: set
+    ) -> None:
+        """Convert string digits → numbers **only** for known numeric fields.
+
+        Walks nested AND/OR condition trees so that identifier fields like
+        ``invoice_number`` are never accidentally cast to int.
+        """
+        for cond in conditions:
+            # Nested group (AND / OR)
+            if "conditions" in cond:
+                RetrievalPipeline._coerce_numeric_filter_values(
+                    cond["conditions"], numeric_fields
+                )
+                continue
+            field = cond.get("field", "")
+            value = cond.get("value")
+            if field in numeric_fields and isinstance(value, str):
+                try:
+                    cond["value"] = float(value) if "." in value else int(value)
+                except ValueError:
+                    pass  # leave as-is
+
+    # ------------------------------------------------------------------
     # Metadata extraction
     # ------------------------------------------------------------------
     @observe(name="metadata_extraction")
@@ -247,12 +274,14 @@ class RetrievalPipeline:
         else:
             logger.info("No filters extracted, using full semantic search")
 
-        # Normalize numeric filters
+        # Normalize numeric filters — only for fields that are truly numeric
+        # in Qdrant (e.g. amount). Identifier fields like invoice_number are
+        # stored as strings even when they look like numbers.
+        _NUMERIC_FIELDS = {"meta.amount", "meta.year", "meta.month", "meta.day"}
         if extracted_filters:
-            for condition in extracted_filters.get("conditions", []):
-                value = condition.get("value")
-                if isinstance(value, str) and value.isdigit():
-                    condition["value"] = int(value)
+            self._coerce_numeric_filter_values(
+                extracted_filters.get("conditions", []), _NUMERIC_FIELDS
+            )
 
         return {
             "filters": extracted_filters,
