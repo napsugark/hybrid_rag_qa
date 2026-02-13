@@ -2,6 +2,7 @@
 Tests for src/pipelines/retrieval.py — RetrievalPipeline.
 """
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,14 +14,19 @@ class TestRetrievalPipeline:
     def test_empty_response_structure(self):
         """_empty_response should return a well-formed dict."""
         from src.pipelines.retrieval import RetrievalPipeline
-        from src.resilience import CircuitBreaker, RateLimiter
-        from src.cache import CacheManager
-        from src.components.query_metadata_extractor import RomanianQueryMetadataExtractor
 
         pipeline = RetrievalPipeline.__new__(RetrievalPipeline)
-        # Call the static-ish helper directly
-        resp = pipeline._empty_response("test query", "no docs")
-        assert resp["query"] == "test query"
-        assert resp["answer"] == "no docs"
-        assert resp["documents"] == []
-        assert "timings" in resp
+
+        metadata = {
+            "filters": None,
+            "metadata": {},
+            "search_query": "test query",
+            "extraction_time": 0.01,
+        }
+        resp = pipeline._empty_response(metadata, time.time())
+
+        assert resp["retriever"]["documents"] == []
+        assert len(resp["generator"]["replies"]) == 1
+        assert "metadata" in resp
+        assert resp["metadata"]["documents_retrieved"] == 0
+        assert resp["metadata"]["extracted_filters"] is None
