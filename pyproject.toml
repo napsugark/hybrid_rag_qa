@@ -42,9 +42,6 @@ optional = true
 torch = ">=2.0.0"
 
 [tool.poetry.scripts]
-index-docs = "scripts.index_documents:main"
-query = "scripts.query_app:main"
-investigate = "investigate_documents:main"
 api-server = "src.api.server:start_server"
 
 [build-system]
