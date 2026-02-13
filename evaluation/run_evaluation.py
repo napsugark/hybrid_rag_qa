@@ -400,10 +400,19 @@ class RAGEvaluator:
             "results": self.results,
         }
         
-        with open(filename, "w", encoding="utf-8") as f:
+        # Determine logs directory from config (fallback to ./logs)
+        logs_dir = getattr(config, "LOGS_DIR", None)
+        if logs_dir is None:
+            logs_dir = Path("logs")
+
+        logs_dir = Path(logs_dir)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        filepath = logs_dir / filename
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
-        
-        print(f"\n💾 Results saved to: {filename}")
+
+        print(f"\n💾 Results saved to: {filepath}")
 
 
 def main():
