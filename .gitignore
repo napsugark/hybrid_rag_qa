@@ -12,6 +12,7 @@ __pycache__/
 
 # secrets
 .env
+.env.local
 
 # OS
 .DS_Store
